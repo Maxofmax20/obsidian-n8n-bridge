@@ -34,7 +34,7 @@ const DEFAULT_SETTINGS: N8nBridgeSettings = {
 	sendPath: "/webhook/obsidian-send",
 	device: "",
 	secret: "",
-	pollSeconds: 5,
+	pollSeconds: 2,
 	enablePolling: true,
 	notifyOnJob: true,
 };
@@ -76,6 +76,7 @@ interface JobResult {
 export default class N8nBridgePlugin extends Plugin {
 	settings: N8nBridgeSettings;
 	private pollTimer: number | null = null;
+	private pollGen = 0; // bumped to invalidate the running long-poll loop
 	private polling = false; // re-entrancy guard
 	private statusEl: HTMLElement | null = null;
 
@@ -166,17 +167,28 @@ export default class N8nBridgePlugin extends Plugin {
 			this.setStatus("paused");
 			return;
 		}
-		const ms = Math.max(2, this.settings.pollSeconds) * 1000;
-		// window.setInterval is registered so Obsidian clears it on unload.
-		this.pollTimer = this.registerInterval(
-			window.setInterval(() => this.pollOnce(false), ms)
-		);
+		this.pollGen++; // invalidate any in-flight loop from a previous start
 		this.setStatus("idle");
-		// Do an immediate first poll so there's no initial delay.
-		this.pollOnce(false);
+		// Self-scheduling long-poll: each cycle starts only after the previous
+		// one returns, so a held-open (long-poll) request never stacks. The
+		// server holds the connection until a job appears or ~36s elapses, so
+		// this is near-instant on a job yet makes very few requests when idle.
+		this.pollLoop(this.pollGen);
+	}
+
+	private async pollLoop(gen: number) {
+		while (gen === this.pollGen && this.settings.enablePolling) {
+			await this.pollOnce(false);
+			if (gen !== this.pollGen || !this.settings.enablePolling) return;
+			// Tiny gap between held-open requests so a fast-returning empty
+			// poll (e.g. server not in long-poll mode) can't hot-spin.
+			const gapMs = Math.max(1, this.settings.pollSeconds) * 1000;
+			await new Promise((r) => window.setTimeout(r, gapMs));
+		}
 	}
 
 	stopPolling() {
+		this.pollGen++; // any running loop sees gen change and exits
 		if (this.pollTimer !== null) {
 			window.clearInterval(this.pollTimer);
 			this.pollTimer = null;
@@ -581,14 +593,16 @@ class N8nBridgeSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Poll interval (seconds)")
-			.setDesc("How often to check n8n for jobs. Higher = less battery/data.")
+			.setName("Poll gap (seconds)")
+			.setDesc(
+				"Long-poll: each request holds open on the server until a job appears (~instant) or ~36s passes. This is the small pause between those held-open requests. 2–5 is fine; higher saves a little battery."
+			)
 			.addText((t) =>
 				t
 					.setValue(String(this.plugin.settings.pollSeconds))
 					.onChange(async (v) => {
 						const n = parseInt(v, 10);
-						this.plugin.settings.pollSeconds = isNaN(n) ? 5 : Math.max(2, n);
+						this.plugin.settings.pollSeconds = isNaN(n) ? 2 : Math.max(1, n);
 						await this.plugin.saveSettings();
 						this.plugin.startPolling();
 					})

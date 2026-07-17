@@ -6,7 +6,7 @@ Two-way bridge between your Obsidian vault and n8n, so an n8n workflow — or **
 
 ## How it works
 
-A phone (or any Obsidian app) can't be reached from the outside, so the plugin never listens for connections. Instead it **polls** n8n:
+A phone (or any Obsidian app) can't be reached from the outside, so the plugin never listens for connections. Instead it **long-polls** n8n: each request holds open on the server until a job appears (returns instantly) or ~21 s elapse (returns empty), then repeats. This gives near-instant response while making very few requests when idle.
 
 ```
 Claude / Master agent
@@ -61,7 +61,7 @@ Open **Settings → n8n Bridge**:
 | **n8n base URL** | `https://demos25.me` |
 | **Device name** | A **unique** id for THIS device, e.g. `obsidian-phone`, `obsidian-laptop`. Claude targets a device by this exact name. Auto-filled with `obsidian-xxxxxx` on first run — rename it to something you'll recognise. |
 | **Shared secret** | The SAME value on every device and in n8n (the value configured in your n8n workflows — keep it private, treat it like a password). ⚠️ The plugin auto-generates a random secret on first run; **replace it** with your shared value or the backend will reject every request. |
-| **Poll interval (seconds)** | `5` is fine. Lower = snappier but more requests. |
+| **Poll gap (seconds)** | `2` is fine. This is **long-poll**: each request holds open on the server until a job appears (near-instant) or ~21 s pass, then repeats. So a low number here does **not** hammer n8n — it just sets the short pause between held-open requests. |
 
 The poll/result/send webhook paths are pre-filled and don't need changing.
 
