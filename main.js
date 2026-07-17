@@ -25087,7 +25087,7 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
     try {
       const { McpServer: McpServer2 } = await Promise.resolve().then(() => (init_mcp(), mcp_exports));
       const { StreamableHTTPServerTransport: StreamableHTTPServerTransport2 } = await Promise.resolve().then(() => (init_streamableHttp(), streamableHttp_exports));
-      const http = await import("http");
+      const http = window.require("http");
       this.mcpServer = new McpServer2({
         name: this.settings.mcpName,
         version: "1.0.0"

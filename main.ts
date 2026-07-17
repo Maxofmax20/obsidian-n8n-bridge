@@ -1051,7 +1051,8 @@ export default class N8nBridgePlugin extends Plugin {
 			// Dynamic import to avoid bundling issues
 			const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
 			const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
-			const http = await import("http");
+			// Use require for Node builtins in Electron/Obsidian
+			const http = window.require("http");
 
 			this.mcpServer = new McpServer({
 				name: this.settings.mcpName,
