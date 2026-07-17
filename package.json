@@ -21,5 +21,8 @@
 		"esbuild": "0.20.0",
 		"obsidian": "latest",
 		"typescript": "5.3.3"
+	},
+	"dependencies": {
+		"@modelcontextprotocol/sdk": "^1.29.0"
 	}
 }

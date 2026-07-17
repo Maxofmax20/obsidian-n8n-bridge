@@ -1033,11 +1033,192 @@ export default class N8nBridgePlugin extends Plugin {
 		render();
 	}
 
-	toggleMcpServer(enabled: boolean) {
+	/* ---------------- MCP Server ---------------- */
+
+	private mcpServer: McpServer | null = null;
+	private mcpHttpServer: any = null;
+
+	async toggleMcpServer(enabled: boolean) {
 		if (enabled) {
-			new Notice("MCP Server enabled on port " + this.settings.mcpPort + ". Configure n8n to connect to http://localhost:" + this.settings.mcpPort);
+			await this.startMcpServer();
 		} else {
-			new Notice("MCP Server disabled");
+			await this.stopMcpServer();
+		}
+	}
+
+	private async startMcpServer() {
+		try {
+			// Dynamic import to avoid bundling issues
+			const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+			const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
+			const http = await import("http");
+
+			this.mcpServer = new McpServer({
+				name: this.settings.mcpName,
+				version: "1.0.0",
+			});
+
+			// Tool: read_note
+			this.mcpServer.tool(
+				"read_note",
+				"Read a note from the Obsidian vault",
+				{ path: { type: "string", description: "Vault-relative path to the note (e.g. 'Notes/My Note.md')" } },
+				async ({ path }) => {
+					try {
+						const file = this.app.vault.getAbstractFileByPath(path);
+						if (!(file instanceof TFile)) throw new Error(`Note not found: ${path}`);
+						const content = await this.app.vault.read(file);
+						return { content: [{ type: "text", text: content }] };
+					} catch (e) {
+						return { content: [{ type: "text", text: `Error: ${errMsg(e)}` }], isError: true };
+					}
+				}
+			);
+
+			// Tool: write_note
+			this.mcpServer.tool(
+				"write_note",
+				"Create or overwrite a note in the Obsidian vault",
+				{
+					path: { type: "string", description: "Vault-relative path" },
+					content: { type: "string", description: "Note content" },
+				},
+				async ({ path, content }) => {
+					try {
+						const normalized = path.endsWith(".md") ? path : path + ".md";
+						const file = this.app.vault.getAbstractFileByPath(normalized);
+						if (file instanceof TFile) {
+							await this.app.vault.modify(file, content);
+						} else {
+							await this.ensureFolder(normalized);
+							await this.app.vault.create(normalized, content);
+						}
+						return { content: [{ type: "text", text: `Written: ${normalized}` }] };
+					} catch (e) {
+						return { content: [{ type: "text", text: `Error: ${errMsg(e)}` }], isError: true };
+					}
+				}
+			);
+
+			// Tool: append_note
+			this.mcpServer.tool(
+				"append_note",
+				"Append content to an existing note",
+				{
+					path: { type: "string", description: "Vault-relative path" },
+					content: { type: "string", description: "Content to append" },
+				},
+				async ({ path, content }) => {
+					try {
+						const normalized = path.endsWith(".md") ? path : path + ".md";
+						const file = this.app.vault.getAbstractFileByPath(normalized);
+						if (file instanceof TFile) {
+							await this.app.vault.append(file, content.startsWith("\n") ? content : "\n" + content);
+						} else {
+							await this.ensureFolder(normalized);
+							await this.app.vault.create(normalized, content);
+						}
+						return { content: [{ type: "text", text: `Appended to: ${normalized}` }] };
+					} catch (e) {
+						return { content: [{ type: "text", text: `Error: ${errMsg(e)}` }], isError: true };
+					}
+				}
+			);
+
+			// Tool: list_notes
+			this.mcpServer.tool(
+				"list_notes",
+				"List notes in the vault, optionally filtered by folder",
+				{ folder: { type: "string", description: "Optional folder path to filter by" } },
+				async ({ folder }) => {
+					try {
+						const files = this.app.vault.getMarkdownFiles();
+						const filtered = folder
+							? files.filter((f) => f.path.startsWith(folder))
+							: files;
+						const notes = filtered
+							.slice(0, 200)
+							.map((f) => ({ path: f.path, name: f.basename, mtime: f.stat.mtime }))
+							.sort((a, b) => b.mtime - a.mtime);
+						return { content: [{ type: "text", text: JSON.stringify(notes, null, 2) }] };
+					} catch (e) {
+						return { content: [{ type: "text", text: `Error: ${errMsg(e)}` }], isError: true };
+					}
+				}
+			);
+
+			// Tool: search_vault
+			this.mcpServer.tool(
+				"search_vault",
+				"Search note contents in the vault",
+				{ query: { type: "string", description: "Search query" } },
+				async ({ query }) => {
+					try {
+						const files = this.app.vault.getMarkdownFiles();
+						const hits: Array<{ path: string; excerpt: string }> = [];
+						for (const f of files) {
+							const text = await this.app.vault.cachedRead(f);
+							const idx = text.toLowerCase().indexOf(query.toLowerCase());
+							if (idx >= 0) {
+								const start = Math.max(0, idx - 80);
+								hits.push({ path: f.path, excerpt: text.slice(start, idx + query.length + 80).replace(/\s+/g, " ").trim() });
+								if (hits.length >= 50) break;
+							}
+						}
+						return { content: [{ type: "text", text: JSON.stringify(hits, null, 2) }] };
+					} catch (e) {
+						return { content: [{ type: "text", text: `Error: ${errMsg(e)}` }], isError: true };
+					}
+				}
+			);
+
+			// Create HTTP server
+			const transport = new StreamableHTTPServerTransport({
+				sessionIdGenerator: undefined,
+			});
+
+			await this.mcpServer.connect(transport);
+
+			this.mcpHttpServer = http.createServer(async (req: any, res: any) => {
+				// CORS
+				res.setHeader("Access-Control-Allow-Origin", "*");
+				res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+				res.setHeader("Access-Control-Allow-Headers", "Content-Type, mcp-session-id");
+				if (req.method === "OPTIONS") {
+					res.writeHead(204);
+					res.end();
+					return;
+				}
+				await transport.handleRequest(req, res);
+			});
+
+			this.mcpHttpServer.listen(this.settings.mcpPort, () => {
+				new Notice(`MCP Server running on http://localhost:${this.settings.mcpPort}/mcp`);
+			});
+
+			this.mcpHttpServer.on("error", (err: any) => {
+				console.error("MCP Server error:", err);
+				new Notice(`MCP Server error: ${err.message}`);
+			});
+		} catch (e) {
+			new Notice(`Failed to start MCP Server: ${errMsg(e)}`);
+			console.error("MCP Server start error:", e);
+		}
+	}
+
+	private async stopMcpServer() {
+		try {
+			if (this.mcpServer) {
+				await this.mcpServer.close();
+				this.mcpServer = null;
+			}
+			if (this.mcpHttpServer) {
+				this.mcpHttpServer.close();
+				this.mcpHttpServer = null;
+			}
+			new Notice("MCP Server stopped");
+		} catch (e) {
+			new Notice(`Error stopping MCP Server: ${errMsg(e)}`);
 		}
 	}
 
