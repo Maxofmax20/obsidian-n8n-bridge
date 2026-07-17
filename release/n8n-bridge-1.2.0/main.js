@@ -110,11 +110,6 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       name: "Import or refresh full MyAnimeList library",
       callback: () => this.importFullMalLibrary()
     });
-    this.addCommand({
-      id: "sync-vault-to-mal",
-      name: "Sync vault anime to MyAnimeList",
-      callback: () => this.syncVaultToMal()
-    });
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
         if (file instanceof import_obsidian.TFile && file.extension === "md") {
@@ -659,53 +654,6 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       await this.app.workspace.getLeaf(false).openFile(this.app.vault.getAbstractFileByPath(dashboardPath));
     } catch (error) {
       new import_obsidian.Notice("MAL library import failed: " + errMsg(error));
-    } finally {
-      notice.hide();
-    }
-  }
-  async syncVaultToMal() {
-    var _a;
-    if (!this.settings.malAccessToken) {
-      new import_obsidian.Notice("Connect MyAnimeList in n8n Bridge settings first.");
-      return;
-    }
-    const notice = new import_obsidian.Notice("Scanning vault for anime notes...", 0);
-    try {
-      const files = this.app.vault.getMarkdownFiles();
-      const animeFiles = files.filter((file) => {
-        var _a2;
-        const fm = ((_a2 = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a2.frontmatter) || {};
-        return fm.mal_id && fm.type === "anime";
-      });
-      if (!animeFiles.length) {
-        new import_obsidian.Notice("No anime notes with mal_id found in vault.");
-        return;
-      }
-      notice.setMessage(`Found ${animeFiles.length} anime notes. Syncing to MAL...`);
-      let synced = 0;
-      let failed = 0;
-      for (let i = 0; i < animeFiles.length; i++) {
-        const file = animeFiles[i];
-        const fm = ((_a = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a.frontmatter) || {};
-        const malId = Number(fm.mal_id);
-        const watched = Math.max(0, Number(fm.watched) || 0);
-        const status = String(fm.mal_status || fm.status || "plan_to_watch");
-        const score = Math.max(0, Number(fm.user_score) || 0);
-        const malStatus = MAL_STATUS[status] || "plan_to_watch";
-        try {
-          await this.updateMalList(malId, watched, status);
-          synced++;
-        } catch (e) {
-          console.error(`Failed to sync ${file.path}:`, e);
-          failed++;
-        }
-        if ((i + 1) % 10 === 0) {
-          notice.setMessage(`Synced ${i + 1}/${animeFiles.length}...`);
-        }
-      }
-      new import_obsidian.Notice(`MAL sync complete: ${synced} updated, ${failed} failed.`);
-    } catch (error) {
-      new import_obsidian.Notice("MAL sync failed: " + errMsg(error));
     } finally {
       notice.hide();
     }

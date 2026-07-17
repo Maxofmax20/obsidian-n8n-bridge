@@ -67,6 +67,20 @@ The poll/result/send webhook paths are pre-filled and don't need changing.
 
 Once base URL + device name + secret are set, the plugin starts polling automatically. Use the **"n8n Bridge: Test connection (ping)"** command to confirm the device answers.
 
+## Full MyAnimeList library
+
+The bridge can build a complete anime library inside the vault without any other Obsidian plugin:
+
+1. In **Settings -> n8n Bridge -> MyAnimeList sync**, enter your MAL application credentials and connect the account.
+2. Click **Import full list**, or run **n8n Bridge: Import or refresh full MyAnimeList library** from the command palette.
+3. Open `Anime Library/Anime Library.md`.
+
+The importer follows every MAL pagination link and creates one note per anime under `Anime Library/Shows`. Each note includes the poster URL, English and MAL titles, MAL ID/link, genres, media type, airing dates/status, personal status and score, MAL score, episodes watched, and total episodes. The generated dashboard provides poster cards, text search, status filtering, scores, and progress bars on desktop and mobile.
+
+Refreshing the library updates MAL-managed frontmatter and the tracker while preserving content written below the personal-notes marker in each anime note.
+
+**Optional add-on:** Dataview is useful only if you want to build additional custom tables or queries from the generated frontmatter. It is not required for the poster dashboard or MAL sync.
+
 ---
 
 ## Onboarding a new device (short version)

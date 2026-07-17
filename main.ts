@@ -259,6 +259,12 @@ export default class N8nBridgePlugin extends Plugin {
 			callback: () => this.importFullMalLibrary(),
 		});
 
+		this.addCommand({
+			id: "sync-vault-to-mal",
+			name: "Sync vault anime to MyAnimeList",
+			callback: () => this.syncVaultToMal(),
+		});
+
 		// Right-click a note -> send to n8n.
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu: Menu, file) => {
@@ -848,6 +854,60 @@ export default class N8nBridgePlugin extends Plugin {
 			await this.app.workspace.getLeaf(false).openFile(this.app.vault.getAbstractFileByPath(dashboardPath) as TFile);
 		} catch (error) {
 			new Notice("MAL library import failed: " + errMsg(error));
+		} finally {
+			notice.hide();
+		}
+	}
+
+	async syncVaultToMal() {
+		if (!this.settings.malAccessToken) {
+			new Notice("Connect MyAnimeList in n8n Bridge settings first.");
+			return;
+		}
+		const notice = new Notice("Scanning vault for anime notes...", 0);
+		try {
+			const files = this.app.vault.getMarkdownFiles();
+			const animeFiles = files.filter((file) => {
+				const fm = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+				return fm.mal_id && fm.type === "anime";
+			});
+
+			if (!animeFiles.length) {
+				new Notice("No anime notes with mal_id found in vault.");
+				return;
+			}
+
+			notice.setMessage(`Found ${animeFiles.length} anime notes. Syncing to MAL...`);
+			let synced = 0;
+			let failed = 0;
+
+			for (let i = 0; i < animeFiles.length; i++) {
+				const file = animeFiles[i];
+				const fm = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+				const malId = Number(fm.mal_id);
+				const watched = Math.max(0, Number(fm.watched) || 0);
+				const status = String(fm.mal_status || fm.status || "plan_to_watch");
+				const score = Math.max(0, Number(fm.user_score) || 0);
+
+				// Map local status to MAL status
+				const malStatus = MAL_STATUS[status] || "plan_to_watch";
+
+				try {
+					await this.updateMalList(malId, watched, status);
+					synced++;
+				} catch (e) {
+					console.error(`Failed to sync ${file.path}:`, e);
+					failed++;
+				}
+
+				if ((i + 1) % 10 === 0) {
+					notice.setMessage(`Synced ${i + 1}/${animeFiles.length}...`);
+				}
+			}
+
+			new Notice(`MAL sync complete: ${synced} updated, ${failed} failed.`);
+		} catch (error) {
+			new Notice("MAL sync failed: " + errMsg(error));
 		} finally {
 			notice.hide();
 		}
