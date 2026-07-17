@@ -191,7 +191,7 @@ interface JobResult {
 /* ------------------------------------------------------------------ */
 
 export default class N8nBridgePlugin extends Plugin {
-	settings: N8nBridgeSettings;
+	settings!: N8nBridgeSettings;
 	private pollTimer: number | null = null;
 	private pollGen = 0; // bumped to invalidate the running long-poll loop
 	private polling = false; // re-entrancy guard
