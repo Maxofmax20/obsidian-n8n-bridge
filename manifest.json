@@ -1,0 +1,10 @@
+{
+	"id": "n8n-bridge",
+	"name": "n8n Bridge",
+	"version": "1.0.0",
+	"minAppVersion": "1.4.0",
+	"description": "Two-way bridge between your Obsidian vault and n8n. Lets an n8n workflow (or Claude via MCP) read and write notes on this device over webhooks. Works on desktop and mobile.",
+	"author": "Mohammed Samir",
+	"authorUrl": "https://demos25.me",
+	"isDesktopOnly": false
+}
