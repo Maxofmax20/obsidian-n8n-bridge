@@ -193,7 +193,11 @@ interface JobResult {
 export default class N8nBridgePlugin extends Plugin {
 	settings!: N8nBridgeSettings;
 	private pollTimer: number | null = null;
+	private watchdogTimer: number | null = null;
 	private polling = false; // re-entrancy guard
+	private pollStartedAt = 0; // when the in-flight cycle began (stuck detection)
+	private lastPollActivity = 0; // when a cycle last completed (watchdog)
+	private authWarned = false; // only toast "unauthorized" once per streak
 	private statusEl: HTMLElement | null = null;
 	private animeSearchCache: Map<string, MalAnimeSearchResult> = new Map();
 
@@ -288,6 +292,32 @@ export default class N8nBridgePlugin extends Plugin {
 				);
 			}
 		});
+
+		// ---- resume triggers: restart polling the instant the app wakes ----
+		// Mobile OSes freeze timers when the app is backgrounded/screen-locked.
+		// Each of these events fires on a different wake path; all funnel into
+		// resumePolling(), which is cheap and idempotent.
+		this.registerDomEvent(document, "visibilitychange", () => {
+			if (!document.hidden) this.resumePolling("visible");
+		});
+		this.registerDomEvent(window, "focus", () => this.resumePolling("focus"));
+		this.registerDomEvent(window, "online", () => this.resumePolling("online"));
+		// Fires when the user switches notes/tabs — a strong "app is alive" signal
+		// that also works on mobile where focus events can be unreliable.
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", () =>
+				this.resumePolling("leaf")
+			)
+		);
+
+		// ---- watchdog: self-heal a silently dead loop ----
+		// If timers were frozen or a cycle got stuck awaiting a dead socket,
+		// no event may ever fire. Check every 15s that a cycle completed
+		// recently; if not, force-restart the loop. registerInterval ties it
+		// to the plugin lifecycle.
+		this.watchdogTimer = this.registerInterval(
+			window.setInterval(() => this.watchdogCheck(), 15_000)
+		);
 	}
 
 	onunload() {
@@ -1253,6 +1283,7 @@ export default class N8nBridgePlugin extends Plugin {
 			window.setInterval(() => this.pollOnce(false), ms)
 		);
 		this.setStatus("idle");
+		this.lastPollActivity = Date.now();
 		// Immediate first poll so there's no initial delay.
 		this.pollOnce(false);
 	}
@@ -1261,6 +1292,46 @@ export default class N8nBridgePlugin extends Plugin {
 		if (this.pollTimer !== null) {
 			window.clearInterval(this.pollTimer);
 			this.pollTimer = null;
+		}
+	}
+
+	/**
+	 * Cheap, idempotent "make sure we're alive" — safe to call on every
+	 * wake/focus/visibility event. Restarts the interval if it's gone and
+	 * fires an immediate catch-up poll so queued jobs drain right away
+	 * instead of waiting out the interval.
+	 */
+	resumePolling(reason: string) {
+		if (!this.settings.enablePolling) return;
+		if (this.pollTimer === null) {
+			console.log(`n8n Bridge: resuming polling (${reason})`);
+			this.startPolling();
+			return;
+		}
+		// Interval exists — still fire a catch-up poll if we've been quiet
+		// longer than one interval (frozen timers don't tick while asleep).
+		const quietMs = Date.now() - this.lastPollActivity;
+		if (quietMs > Math.max(2, this.settings.pollSeconds) * 1000) {
+			this.pollOnce(false);
+		}
+	}
+
+	/**
+	 * Watchdog: if no poll cycle has completed in 3× the interval (min 45s),
+	 * the loop is dead or stuck — rebuild it from scratch. Also breaks a
+	 * cycle stuck >60s on a dead socket by clearing the re-entrancy guard.
+	 */
+	private watchdogCheck() {
+		if (!this.settings.enablePolling) return;
+		const now = Date.now();
+		if (this.polling && this.pollStartedAt && now - this.pollStartedAt > 60_000) {
+			console.warn("n8n Bridge: poll cycle stuck >60s — force-clearing");
+			this.polling = false;
+		}
+		const staleMs = Math.max(45_000, this.settings.pollSeconds * 3000);
+		if (now - this.lastPollActivity > staleMs) {
+			console.warn("n8n Bridge: poll loop stale — watchdog restart");
+			this.startPolling();
 		}
 	}
 
@@ -1287,6 +1358,7 @@ export default class N8nBridgePlugin extends Plugin {
 			return;
 		}
 		this.polling = true;
+		this.pollStartedAt = Date.now();
 		try {
 			const url =
 				this.trimBase() +
@@ -1304,6 +1376,22 @@ export default class N8nBridgePlugin extends Plugin {
 					new Notice(`n8n Bridge: poll failed (HTTP ${resp.status}).`);
 				return;
 			}
+			// Server can reply 200 with {ok:false, error:"unauthorized"} when the
+			// secret/device doesn't match. That's NOT "no jobs" — surface it loudly
+			// or the bridge dies silently while looking healthy.
+			const body = resp.json as any;
+			if (body && body.ok === false) {
+				this.setStatus("error");
+				if (!this.authWarned || manual) {
+					this.authWarned = true;
+					new Notice(
+						`n8n Bridge: server rejected poll (${body.error || "ok:false"}) — check Secret and Device in settings.`,
+						10000
+					);
+				}
+				return;
+			}
+			this.authWarned = false;
 			const jobs = this.parseJobs(resp.json);
 			if (!jobs.length) {
 				this.setStatus("idle");
@@ -1329,6 +1417,7 @@ export default class N8nBridgePlugin extends Plugin {
 			console.error("n8n Bridge poll error", e);
 		} finally {
 			this.polling = false;
+			this.lastPollActivity = Date.now();
 		}
 	}
 
@@ -1454,18 +1543,27 @@ export default class N8nBridgePlugin extends Plugin {
 						: JSON.stringify(result.data ?? "")
 					: result.error ?? "error",
 		};
-		try {
-			await requestUrl({
-				url: this.trimBase() + this.settings.resultPath,
-				method: "POST",
-				contentType: "application/json",
-				headers: { "x-bridge-secret": this.settings.secret },
-				body: JSON.stringify(payload),
-				throw: false,
-			});
-		} catch (e) {
-			console.error("n8n Bridge: failed to post result", e);
+		// Retry the result POST: the job is already marked "taken" server-side,
+		// so if this fails the waiter times out even though the work was done.
+		// 3 attempts with short backoff rides out flaky mobile networks.
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			try {
+				const resp = await requestUrl({
+					url: this.trimBase() + this.settings.resultPath,
+					method: "POST",
+					contentType: "application/json",
+					headers: { "x-bridge-secret": this.settings.secret },
+					body: JSON.stringify(payload),
+					throw: false,
+				});
+				if (resp.status >= 200 && resp.status < 300) return;
+				console.warn(`n8n Bridge: result POST HTTP ${resp.status} (attempt ${attempt}/3)`);
+			} catch (e) {
+				console.warn(`n8n Bridge: result POST failed (attempt ${attempt}/3)`, e);
+			}
+			if (attempt < 3) await new Promise((r) => window.setTimeout(r, 1000 * attempt));
 		}
+		console.error("n8n Bridge: giving up posting result for job", payload.id);
 	}
 
 	/* ---------------- manual push ---------------- */
@@ -1540,7 +1638,7 @@ export default class N8nBridgePlugin extends Plugin {
 		return !!(this.settings.baseUrl && this.settings.device && this.settings.secret);
 	}
 
-	private trimBase(): string {
+	trimBase(): string {
 		return this.settings.baseUrl.replace(/\/+$/, "");
 	}
 
@@ -1626,6 +1724,9 @@ class N8nBridgeSettingTab extends PluginSettingTab {
 					.onChange(async (v) => {
 						this.plugin.settings.device = v.trim();
 						await this.plugin.saveSettings();
+						// New identity — reset auth warning and re-poll now so a
+						// wrong value shows the "rejected" notice immediately.
+						this.plugin.startPolling();
 					})
 			);
 
@@ -1637,16 +1738,67 @@ class N8nBridgeSettingTab extends PluginSettingTab {
 				t.setValue(this.plugin.settings.secret).onChange(async (v) => {
 					this.plugin.settings.secret = v.trim();
 					await this.plugin.saveSettings();
+					this.plugin.startPolling();
 				});
 			})
 			.addExtraButton((b) =>
 				b
 					.setIcon("refresh-cw")
-					.setTooltip("Generate a new secret")
+					.setTooltip(
+						"Generate a new secret (BREAKS the connection until n8n is updated to match!)"
+					)
 					.onClick(async () => {
+						// A silent tap here once replaced a working secret and killed
+						// the bridge for days. Require explicit confirmation.
+						const sure = window.confirm(
+							"Generate a NEW secret?\n\nThis will BREAK the bridge until you update the n8n workflows to accept the new secret. Only do this on purpose."
+						);
+						if (!sure) return;
 						this.plugin.settings.secret = randomToken(24);
 						await this.plugin.saveSettings();
 						this.display();
+						new Notice(
+							"n8n Bridge: new secret generated — update your n8n workflows NOW or the bridge stays broken.",
+							10000
+						);
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Test connection")
+			.setDesc("Round-trip check: verifies URL, secret and device against n8n.")
+			.addButton((b) =>
+				b
+					.setButtonText("Test now")
+					.setCta()
+					.onClick(async () => {
+						b.setButtonText("Testing…").setDisabled(true);
+						try {
+							const url =
+								this.plugin.trimBase() +
+								this.plugin.settings.pollPath +
+								`?device=${encodeURIComponent(this.plugin.settings.device)}` +
+								`&secret=${encodeURIComponent(this.plugin.settings.secret)}`;
+							const resp = await requestUrl({ url, method: "GET", throw: false });
+							const body = (resp.json ?? {}) as any;
+							if (resp.status >= 200 && resp.status < 300 && body.ok !== false) {
+								new Notice(
+									`✅ Connected! Server accepted device "${this.plugin.settings.device}". Pending jobs: ${body.count ?? 0}.`,
+									8000
+								);
+							} else if (body.ok === false) {
+								new Notice(
+									`❌ Server rejected: ${body.error || "unauthorized"} — Secret or Device doesn't match n8n.`,
+									10000
+								);
+							} else {
+								new Notice(`❌ HTTP ${resp.status} — check the base URL / workflow is active.`, 10000);
+							}
+						} catch (e) {
+							new Notice("❌ Network error: " + errMsg(e), 10000);
+						} finally {
+							b.setButtonText("Test now").setDisabled(false);
+						}
 					})
 			);
 

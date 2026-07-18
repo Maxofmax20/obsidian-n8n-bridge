@@ -24289,8 +24289,15 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.pollTimer = null;
+    this.watchdogTimer = null;
     this.polling = false;
     // re-entrancy guard
+    this.pollStartedAt = 0;
+    // when the in-flight cycle began (stuck detection)
+    this.lastPollActivity = 0;
+    // when a cycle last completed (watchdog)
+    this.authWarned = false;
+    // only toast "unauthorized" once per streak
     this.statusEl = null;
     this.animeSearchCache = /* @__PURE__ */ new Map();
     /* ---------------- MCP Server ---------------- */
@@ -24367,6 +24374,21 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
         );
       }
     });
+    this.registerDomEvent(document, "visibilitychange", () => {
+      if (!document.hidden)
+        this.resumePolling("visible");
+    });
+    this.registerDomEvent(window, "focus", () => this.resumePolling("focus"));
+    this.registerDomEvent(window, "online", () => this.resumePolling("online"));
+    this.registerEvent(
+      this.app.workspace.on(
+        "active-leaf-change",
+        () => this.resumePolling("leaf")
+      )
+    );
+    this.watchdogTimer = this.registerInterval(
+      window.setInterval(() => this.watchdogCheck(), 15e3)
+    );
   }
   onunload() {
     this.stopPolling();
@@ -25258,12 +25280,51 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       window.setInterval(() => this.pollOnce(false), ms)
     );
     this.setStatus("idle");
+    this.lastPollActivity = Date.now();
     this.pollOnce(false);
   }
   stopPolling() {
     if (this.pollTimer !== null) {
       window.clearInterval(this.pollTimer);
       this.pollTimer = null;
+    }
+  }
+  /**
+   * Cheap, idempotent "make sure we're alive" — safe to call on every
+   * wake/focus/visibility event. Restarts the interval if it's gone and
+   * fires an immediate catch-up poll so queued jobs drain right away
+   * instead of waiting out the interval.
+   */
+  resumePolling(reason) {
+    if (!this.settings.enablePolling)
+      return;
+    if (this.pollTimer === null) {
+      console.log(`n8n Bridge: resuming polling (${reason})`);
+      this.startPolling();
+      return;
+    }
+    const quietMs = Date.now() - this.lastPollActivity;
+    if (quietMs > Math.max(2, this.settings.pollSeconds) * 1e3) {
+      this.pollOnce(false);
+    }
+  }
+  /**
+   * Watchdog: if no poll cycle has completed in 3× the interval (min 45s),
+   * the loop is dead or stuck — rebuild it from scratch. Also breaks a
+   * cycle stuck >60s on a dead socket by clearing the re-entrancy guard.
+   */
+  watchdogCheck() {
+    if (!this.settings.enablePolling)
+      return;
+    const now = Date.now();
+    if (this.polling && this.pollStartedAt && now - this.pollStartedAt > 6e4) {
+      console.warn("n8n Bridge: poll cycle stuck >60s \u2014 force-clearing");
+      this.polling = false;
+    }
+    const staleMs = Math.max(45e3, this.settings.pollSeconds * 3e3);
+    if (now - this.lastPollActivity > staleMs) {
+      console.warn("n8n Bridge: poll loop stale \u2014 watchdog restart");
+      this.startPolling();
     }
   }
   setStatus(state) {
@@ -25292,6 +25353,7 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       return;
     }
     this.polling = true;
+    this.pollStartedAt = Date.now();
     try {
       const url = this.trimBase() + this.settings.pollPath + `?device=${encodeURIComponent(this.settings.device)}&secret=${encodeURIComponent(this.settings.secret)}`;
       const resp = await (0, import_obsidian.requestUrl)({
@@ -25305,6 +25367,19 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
           new import_obsidian.Notice(`n8n Bridge: poll failed (HTTP ${resp.status}).`);
         return;
       }
+      const body = resp.json;
+      if (body && body.ok === false) {
+        this.setStatus("error");
+        if (!this.authWarned || manual) {
+          this.authWarned = true;
+          new import_obsidian.Notice(
+            `n8n Bridge: server rejected poll (${body.error || "ok:false"}) \u2014 check Secret and Device in settings.`,
+            1e4
+          );
+        }
+        return;
+      }
+      this.authWarned = false;
       const jobs = this.parseJobs(resp.json);
       if (!jobs.length) {
         this.setStatus("idle");
@@ -25330,6 +25405,7 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       console.error("n8n Bridge poll error", e);
     } finally {
       this.polling = false;
+      this.lastPollActivity = Date.now();
     }
   }
   parseJobs(body) {
@@ -25439,18 +25515,26 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       path: (_a6 = result.path) != null ? _a6 : "",
       result: result.ok ? typeof result.data === "string" ? result.data : JSON.stringify((_b = result.data) != null ? _b : "") : (_c = result.error) != null ? _c : "error"
     };
-    try {
-      await (0, import_obsidian.requestUrl)({
-        url: this.trimBase() + this.settings.resultPath,
-        method: "POST",
-        contentType: "application/json",
-        headers: { "x-bridge-secret": this.settings.secret },
-        body: JSON.stringify(payload),
-        throw: false
-      });
-    } catch (e) {
-      console.error("n8n Bridge: failed to post result", e);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const resp = await (0, import_obsidian.requestUrl)({
+          url: this.trimBase() + this.settings.resultPath,
+          method: "POST",
+          contentType: "application/json",
+          headers: { "x-bridge-secret": this.settings.secret },
+          body: JSON.stringify(payload),
+          throw: false
+        });
+        if (resp.status >= 200 && resp.status < 300)
+          return;
+        console.warn(`n8n Bridge: result POST HTTP ${resp.status} (attempt ${attempt}/3)`);
+      } catch (e) {
+        console.warn(`n8n Bridge: result POST failed (attempt ${attempt}/3)`, e);
+      }
+      if (attempt < 3)
+        await new Promise((r) => window.setTimeout(r, 1e3 * attempt));
     }
+    console.error("n8n Bridge: giving up posting result for job", payload.id);
   }
   /* ---------------- manual push ---------------- */
   async sendActiveNote() {
@@ -25577,6 +25661,7 @@ var N8nBridgeSettingTab = class extends import_obsidian.PluginSettingTab {
       (t) => t.setPlaceholder("obsidian-phone").setValue(this.plugin.settings.device).onChange(async (v) => {
         this.plugin.settings.device = v.trim();
         await this.plugin.saveSettings();
+        this.plugin.startPolling();
       })
     );
     new import_obsidian.Setting(containerEl).setName("Shared secret").setDesc("Same value on every device and in n8n. Gates all requests.").addText((t) => {
@@ -25584,12 +25669,52 @@ var N8nBridgeSettingTab = class extends import_obsidian.PluginSettingTab {
       t.setValue(this.plugin.settings.secret).onChange(async (v) => {
         this.plugin.settings.secret = v.trim();
         await this.plugin.saveSettings();
+        this.plugin.startPolling();
       });
     }).addExtraButton(
-      (b) => b.setIcon("refresh-cw").setTooltip("Generate a new secret").onClick(async () => {
+      (b) => b.setIcon("refresh-cw").setTooltip(
+        "Generate a new secret (BREAKS the connection until n8n is updated to match!)"
+      ).onClick(async () => {
+        const sure = window.confirm(
+          "Generate a NEW secret?\n\nThis will BREAK the bridge until you update the n8n workflows to accept the new secret. Only do this on purpose."
+        );
+        if (!sure)
+          return;
         this.plugin.settings.secret = randomToken(24);
         await this.plugin.saveSettings();
         this.display();
+        new import_obsidian.Notice(
+          "n8n Bridge: new secret generated \u2014 update your n8n workflows NOW or the bridge stays broken.",
+          1e4
+        );
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Test connection").setDesc("Round-trip check: verifies URL, secret and device against n8n.").addButton(
+      (b) => b.setButtonText("Test now").setCta().onClick(async () => {
+        var _a6, _b;
+        b.setButtonText("Testing\u2026").setDisabled(true);
+        try {
+          const url = this.plugin.trimBase() + this.plugin.settings.pollPath + `?device=${encodeURIComponent(this.plugin.settings.device)}&secret=${encodeURIComponent(this.plugin.settings.secret)}`;
+          const resp = await (0, import_obsidian.requestUrl)({ url, method: "GET", throw: false });
+          const body = (_a6 = resp.json) != null ? _a6 : {};
+          if (resp.status >= 200 && resp.status < 300 && body.ok !== false) {
+            new import_obsidian.Notice(
+              `\u2705 Connected! Server accepted device "${this.plugin.settings.device}". Pending jobs: ${(_b = body.count) != null ? _b : 0}.`,
+              8e3
+            );
+          } else if (body.ok === false) {
+            new import_obsidian.Notice(
+              `\u274C Server rejected: ${body.error || "unauthorized"} \u2014 Secret or Device doesn't match n8n.`,
+              1e4
+            );
+          } else {
+            new import_obsidian.Notice(`\u274C HTTP ${resp.status} \u2014 check the base URL / workflow is active.`, 1e4);
+          }
+        } catch (e) {
+          new import_obsidian.Notice("\u274C Network error: " + errMsg(e), 1e4);
+        } finally {
+          b.setButtonText("Test now").setDisabled(false);
+        }
       })
     );
     new import_obsidian.Setting(containerEl).setName("Enable background polling").setDesc("When off, only manual 'Check n8n for jobs now' works.").addToggle(
