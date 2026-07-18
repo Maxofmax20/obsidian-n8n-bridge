@@ -24264,7 +24264,7 @@ var DEFAULT_SETTINGS = {
   sendPath: "/webhook/obsidian-send",
   device: "",
   secret: "",
-  pollSeconds: 2,
+  pollSeconds: 5,
   enablePolling: true,
   notifyOnJob: true,
   malClientId: "",
@@ -24289,8 +24289,6 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.pollTimer = null;
-    this.pollGen = 0;
-    // bumped to invalidate the running long-poll loop
     this.polling = false;
     // re-entrancy guard
     this.statusEl = null;
@@ -25255,21 +25253,14 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       this.setStatus("paused");
       return;
     }
-    this.pollGen++;
+    const ms = Math.max(2, this.settings.pollSeconds) * 1e3;
+    this.pollTimer = this.registerInterval(
+      window.setInterval(() => this.pollOnce(false), ms)
+    );
     this.setStatus("idle");
-    this.pollLoop(this.pollGen);
-  }
-  async pollLoop(gen) {
-    while (gen === this.pollGen && this.settings.enablePolling) {
-      await this.pollOnce(false);
-      if (gen !== this.pollGen || !this.settings.enablePolling)
-        return;
-      const gapMs = Math.max(1, this.settings.pollSeconds) * 1e3;
-      await new Promise((r) => window.setTimeout(r, gapMs));
-    }
+    this.pollOnce(false);
   }
   stopPolling() {
-    this.pollGen++;
     if (this.pollTimer !== null) {
       window.clearInterval(this.pollTimer);
       this.pollTimer = null;
@@ -25608,12 +25599,10 @@ var N8nBridgeSettingTab = class extends import_obsidian.PluginSettingTab {
         this.plugin.startPolling();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Poll gap (seconds)").setDesc(
-      "Long-poll: each request holds open on the server until a job appears (~instant) or ~36s passes. This is the small pause between those held-open requests. 2\u20135 is fine; higher saves a little battery."
-    ).addText(
+    new import_obsidian.Setting(containerEl).setName("Poll interval (seconds)").setDesc("How often to check n8n for jobs. Higher = less battery/data.").addText(
       (t) => t.setValue(String(this.plugin.settings.pollSeconds)).onChange(async (v) => {
         const n = parseInt(v, 10);
-        this.plugin.settings.pollSeconds = isNaN(n) ? 2 : Math.max(1, n);
+        this.plugin.settings.pollSeconds = isNaN(n) ? 5 : Math.max(2, n);
         await this.plugin.saveSettings();
         this.plugin.startPolling();
       })
