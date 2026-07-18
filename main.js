@@ -25433,6 +25433,27 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       switch (job.action) {
         case "ping":
           return { ...base, ok: true, data: { pong: true, vault: this.app.vault.getName() } };
+        case "mal_token": {
+          const token = await this.malAccessToken();
+          return {
+            ...base,
+            ok: true,
+            data: {
+              access_token: token,
+              client_id: this.settings.malClientId,
+              expires_at: this.settings.malTokenExpiresAt
+            }
+          };
+        }
+        case "read_file": {
+          const p = (0, import_obsidian.normalizePath)(job.path || "");
+          if (!p)
+            throw new Error("read_file: path required");
+          if (!await this.app.vault.adapter.exists(p))
+            throw new Error("file not found: " + p);
+          const content = await this.app.vault.adapter.read(p);
+          return { ...base, ok: true, data: { content, path: p } };
+        }
         case "read_note": {
           const file = this.requireFile(job.path);
           const content = await this.app.vault.read(file);

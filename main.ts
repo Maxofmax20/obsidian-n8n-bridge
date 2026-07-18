@@ -164,11 +164,13 @@ interface Job {
 	id: string; // unique job id, echoed back in the result
 	action:
 		| "read_note"
+		| "read_file"
 		| "write_note"
 		| "append_note"
 		| "create_note"
 		| "list_notes"
 		| "search_vault"
+		| "mal_token"
 		| "ping";
 	path?: string; // vault-relative path, for note ops
 	content?: string; // payload for write/append/create
@@ -1444,6 +1446,35 @@ export default class N8nBridgePlugin extends Plugin {
 			switch (job.action) {
 				case "ping":
 					return { ...base, ok: true, data: { pong: true, vault: this.app.vault.getName() } };
+
+				case "mal_token": {
+					// Returns a valid MAL access token, refreshing it if needed via
+					// the plugin's own refresh flow. Gated by the bridge secret like
+					// every other action; lets the remote agent write to MAL without
+					// tokens ever being stored off-device.
+					const token = await this.malAccessToken();
+					return {
+						...base,
+						ok: true,
+						data: {
+							access_token: token,
+							client_id: this.settings.malClientId,
+							expires_at: this.settings.malTokenExpiresAt,
+						},
+					};
+				}
+
+				case "read_file": {
+					// Adapter-level read: reaches any file in the vault folder,
+					// including .obsidian configs — unlike read_note, which only
+					// resolves indexed .md notes.
+					const p = normalizePath(job.path || "");
+					if (!p) throw new Error("read_file: path required");
+					if (!(await this.app.vault.adapter.exists(p)))
+						throw new Error("file not found: " + p);
+					const content = await this.app.vault.adapter.read(p);
+					return { ...base, ok: true, data: { content, path: p } };
+				}
 
 				case "read_note": {
 					const file = this.requireFile(job.path);
