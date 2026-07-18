@@ -24361,10 +24361,20 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
         }
       })
     );
-    this.app.workspace.onLayoutReady(() => this.startPolling());
+    this.app.workspace.onLayoutReady(() => {
+      this.startPolling();
+      if (this.settings.mcpEnabled) {
+        this.startMcpServer().catch(
+          (e) => console.error("MCP auto-start failed:", e)
+        );
+      }
+    });
   }
   onunload() {
     this.stopPolling();
+    this.stopMcpServer().catch(
+      (e) => console.error("MCP stop failed on unload:", e)
+    );
   }
   /* ---------------- settings persistence ---------------- */
   async loadSettings() {
@@ -25084,6 +25094,7 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
     }
   }
   async startMcpServer() {
+    await this.stopMcpServer();
     try {
       const { McpServer: McpServer2 } = await Promise.resolve().then(() => (init_mcp(), mcp_exports));
       const { StreamableHTTPServerTransport: StreamableHTTPServerTransport2 } = await Promise.resolve().then(() => (init_streamableHttp(), streamableHttp_exports));
@@ -25221,6 +25232,7 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
     }
   }
   async stopMcpServer() {
+    const wasRunning = this.mcpServer !== null || this.mcpHttpServer !== null;
     try {
       if (this.mcpServer) {
         await this.mcpServer.close();
@@ -25230,7 +25242,8 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
         this.mcpHttpServer.close();
         this.mcpHttpServer = null;
       }
-      new import_obsidian.Notice("MCP Server stopped");
+      if (wasRunning)
+        new import_obsidian.Notice("MCP Server stopped");
     } catch (e) {
       new import_obsidian.Notice(`Error stopping MCP Server: ${errMsg(e)}`);
     }

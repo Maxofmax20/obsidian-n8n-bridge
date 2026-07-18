@@ -280,11 +280,23 @@ export default class N8nBridgePlugin extends Plugin {
 		);
 
 		// Kick off the background poll loop once the workspace is ready.
-		this.app.workspace.onLayoutReady(() => this.startPolling());
+		this.app.workspace.onLayoutReady(() => {
+			this.startPolling();
+			// Auto-start the local MCP server if the user left it enabled.
+			if (this.settings.mcpEnabled) {
+				this.startMcpServer().catch((e) =>
+					console.error("MCP auto-start failed:", e)
+				);
+			}
+		});
 	}
 
 	onunload() {
 		this.stopPolling();
+		// Tear down the MCP HTTP server so the port is released on reload.
+		this.stopMcpServer().catch((e) =>
+			console.error("MCP stop failed on unload:", e)
+		);
 	}
 
 	/* ---------------- settings persistence ---------------- */
@@ -1035,7 +1047,7 @@ export default class N8nBridgePlugin extends Plugin {
 
 	/* ---------------- MCP Server ---------------- */
 
-	private mcpServer: McpServer | null = null;
+	private mcpServer: any = null;
 	private mcpHttpServer: any = null;
 
 	async toggleMcpServer(enabled: boolean) {
@@ -1047,6 +1059,8 @@ export default class N8nBridgePlugin extends Plugin {
 	}
 
 	private async startMcpServer() {
+		// Never stack two servers on the same port; stop any existing one first.
+		await this.stopMcpServer();
 		try {
 			// Dynamic import to avoid bundling issues
 			const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
@@ -1064,7 +1078,7 @@ export default class N8nBridgePlugin extends Plugin {
 				"read_note",
 				"Read a note from the Obsidian vault",
 				{ path: { type: "string", description: "Vault-relative path to the note (e.g. 'Notes/My Note.md')" } },
-				async ({ path }) => {
+				async ({ path }: { path: string }) => {
 					try {
 						const file = this.app.vault.getAbstractFileByPath(path);
 						if (!(file instanceof TFile)) throw new Error(`Note not found: ${path}`);
@@ -1084,7 +1098,7 @@ export default class N8nBridgePlugin extends Plugin {
 					path: { type: "string", description: "Vault-relative path" },
 					content: { type: "string", description: "Note content" },
 				},
-				async ({ path, content }) => {
+				async ({ path, content }: { path: string; content: string }) => {
 					try {
 						const normalized = path.endsWith(".md") ? path : path + ".md";
 						const file = this.app.vault.getAbstractFileByPath(normalized);
@@ -1109,7 +1123,7 @@ export default class N8nBridgePlugin extends Plugin {
 					path: { type: "string", description: "Vault-relative path" },
 					content: { type: "string", description: "Content to append" },
 				},
-				async ({ path, content }) => {
+				async ({ path, content }: { path: string; content: string }) => {
 					try {
 						const normalized = path.endsWith(".md") ? path : path + ".md";
 						const file = this.app.vault.getAbstractFileByPath(normalized);
@@ -1131,7 +1145,7 @@ export default class N8nBridgePlugin extends Plugin {
 				"list_notes",
 				"List notes in the vault, optionally filtered by folder",
 				{ folder: { type: "string", description: "Optional folder path to filter by" } },
-				async ({ folder }) => {
+				async ({ folder }: { folder: string }) => {
 					try {
 						const files = this.app.vault.getMarkdownFiles();
 						const filtered = folder
@@ -1153,7 +1167,7 @@ export default class N8nBridgePlugin extends Plugin {
 				"search_vault",
 				"Search note contents in the vault",
 				{ query: { type: "string", description: "Search query" } },
-				async ({ query }) => {
+				async ({ query }: { query: string }) => {
 					try {
 						const files = this.app.vault.getMarkdownFiles();
 						const hits: Array<{ path: string; excerpt: string }> = [];
@@ -1208,6 +1222,7 @@ export default class N8nBridgePlugin extends Plugin {
 	}
 
 	private async stopMcpServer() {
+		const wasRunning = this.mcpServer !== null || this.mcpHttpServer !== null;
 		try {
 			if (this.mcpServer) {
 				await this.mcpServer.close();
@@ -1217,7 +1232,7 @@ export default class N8nBridgePlugin extends Plugin {
 				this.mcpHttpServer.close();
 				this.mcpHttpServer = null;
 			}
-			new Notice("MCP Server stopped");
+			if (wasRunning) new Notice("MCP Server stopped");
 		} catch (e) {
 			new Notice(`Error stopping MCP Server: ${errMsg(e)}`);
 		}
