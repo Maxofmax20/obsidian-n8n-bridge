@@ -174,9 +174,10 @@ interface Job {
 		| "list_notes"
 		| "search_vault"
 		| "mal_token"
+		| "sync_brain"
 		| "ping";
 	path?: string; // vault-relative path, for note ops
-	content?: string; // payload for write/append/create
+	content?: string; // payload for write/append/create; JSON facts for sync_brain
 	query?: string; // for search_vault
 	folder?: string; // optional scope for list_notes
 }
@@ -1572,6 +1573,79 @@ case "create_note": {
 						}
 					}
 					return { ...base, ok: true, data: { count: hits.length, hits } };
+				}
+
+				case "sync_brain": {
+					// One-shot brain sync done entirely in-plugin so the whole
+					// operation is a SINGLE bridge round-trip (the old n8n version
+					// made 8+ blocking calls per device and the task runner killed
+					// it). Input: job.content = JSON { facts: {k:v}, stamp }.
+					// Output: { edits: {k:v} } — fact lines the user changed in any
+					// section note, for n8n to push back into the table.
+					const payload = JSON.parse(job.content || "{}");
+					const facts: Record<string, string> = payload.facts || {};
+					const stamp: string = payload.stamp || new Date().toISOString();
+					const DIR = "Brain";
+					const SECTIONS = ["Identity", "People", "Education", "Preferences", "Projects", "Misc"];
+					const sectionOf = (key: string): string => {
+						const k = key.toLowerCase();
+						if (/contact|phone|friend|family|father|mother|brother|sister|colleague/.test(k)) return "People";
+						if (/university|course|lecture|study|group|exam|college|school|major|grade|semester/.test(k)) return "Education";
+						if (/prefer|language|communication|view|style|like|dislike|favorite/.test(k)) return "Preferences";
+						if (/project|goal|plan|work|business|idea|app|bot|agent/.test(k)) return "Projects";
+						if (/^user_|^name$|^age$|^city$|birthday|identity|account|email/.test(k)) return "Identity";
+						return "Misc";
+					};
+
+					// 1) reverse sync: read existing section notes, collect edits
+					const edits: Record<string, string> = {};
+					for (const s of SECTIONS) {
+						const p = normalizePath(`${DIR}/${s}.md`);
+						const f = this.app.vault.getAbstractFileByPath(p);
+						if (!(f instanceof TFile)) continue;
+						const content = await this.app.vault.read(f);
+						for (const line of content.split("\n")) {
+							const m = line.match(/^- \*\*([a-zA-Z0-9_]+)\*\*: (.*)$/);
+							if (!m) continue;
+							const k = m[1], v = m[2].trim();
+							if (facts[k] !== v) { edits[k] = v; facts[k] = v; }
+						}
+					}
+
+					// 2) bucket facts into sections (sorted)
+					const buckets: Record<string, string[]> = {};
+					for (const s of SECTIONS) buckets[s] = [];
+					for (const k of Object.keys(facts).sort()) buckets[sectionOf(k)].push(k);
+
+					// 3) write each section note + index
+					const writeNote = async (path: string, content: string) => {
+						const norm = normalizePath(path);
+						const existing = this.app.vault.getAbstractFileByPath(norm);
+						if (existing instanceof TFile) await this.app.vault.modify(existing, content);
+						else { await this.ensureFolder(norm); await this.app.vault.create(norm, content); }
+					};
+					const sectionNote = (s: string): string => {
+						const siblings = SECTIONS.filter((x) => x !== s).map((x) => `[[${x}]]`).join(" · ");
+						const lines = ["---", "cssclasses:", "  - agent-brain", "---", `# ${s}`, "",
+							`Part of [[Brain Index]] · ${siblings}`, ""];
+						if (!buckets[s].length) lines.push("*Empty — facts will appear here as the agent learns.*");
+						for (const k of buckets[s]) lines.push(`- **${k}**: ${facts[k]}`);
+						lines.push("", `*Last sync: ${stamp}*`);
+						return lines.join("\n") + "\n";
+					};
+					for (const s of SECTIONS) await writeNote(`${DIR}/${s}.md`, sectionNote(s));
+
+					const idx = ["---", "cssclasses:", "  - agent-brain", "---", "# Brain Index", "",
+						"The agent's memory, organized like a brain. Each section is a lobe; edit any fact line to update the agent.", ""];
+					for (const s of SECTIONS) idx.push(`- [[${s}]] — ${buckets[s].length} facts`);
+					idx.push("", `*Last sync: ${stamp}*`);
+					await writeNote(`${DIR}/Brain Index.md`, idx.join("\n") + "\n");
+
+					// 4) retire the old single-file brain
+					const old = this.app.vault.getAbstractFileByPath(normalizePath(`${DIR}/Agent Brain.md`));
+					if (old instanceof TFile) await this.app.vault.trash(old, true);
+
+					return { ...base, ok: true, data: { edits, sections: SECTIONS.length, facts: Object.keys(facts).length } };
 				}
 
 				default:

@@ -25577,6 +25577,99 @@ All anime linked here appear in the graph view as one cluster.
           }
           return { ...base, ok: true, data: { count: hits.length, hits } };
         }
+        case "sync_brain": {
+          const payload = JSON.parse(job.content || "{}");
+          const facts = payload.facts || {};
+          const stamp = payload.stamp || (/* @__PURE__ */ new Date()).toISOString();
+          const DIR = "Brain";
+          const SECTIONS = ["Identity", "People", "Education", "Preferences", "Projects", "Misc"];
+          const sectionOf = (key) => {
+            const k = key.toLowerCase();
+            if (/contact|phone|friend|family|father|mother|brother|sister|colleague/.test(k))
+              return "People";
+            if (/university|course|lecture|study|group|exam|college|school|major|grade|semester/.test(k))
+              return "Education";
+            if (/prefer|language|communication|view|style|like|dislike|favorite/.test(k))
+              return "Preferences";
+            if (/project|goal|plan|work|business|idea|app|bot|agent/.test(k))
+              return "Projects";
+            if (/^user_|^name$|^age$|^city$|birthday|identity|account|email/.test(k))
+              return "Identity";
+            return "Misc";
+          };
+          const edits = {};
+          for (const s of SECTIONS) {
+            const p = (0, import_obsidian.normalizePath)(`${DIR}/${s}.md`);
+            const f = this.app.vault.getAbstractFileByPath(p);
+            if (!(f instanceof import_obsidian.TFile))
+              continue;
+            const content = await this.app.vault.read(f);
+            for (const line of content.split("\n")) {
+              const m = line.match(/^- \*\*([a-zA-Z0-9_]+)\*\*: (.*)$/);
+              if (!m)
+                continue;
+              const k = m[1], v = m[2].trim();
+              if (facts[k] !== v) {
+                edits[k] = v;
+                facts[k] = v;
+              }
+            }
+          }
+          const buckets = {};
+          for (const s of SECTIONS)
+            buckets[s] = [];
+          for (const k of Object.keys(facts).sort())
+            buckets[sectionOf(k)].push(k);
+          const writeNote = async (path, content) => {
+            const norm = (0, import_obsidian.normalizePath)(path);
+            const existing = this.app.vault.getAbstractFileByPath(norm);
+            if (existing instanceof import_obsidian.TFile)
+              await this.app.vault.modify(existing, content);
+            else {
+              await this.ensureFolder(norm);
+              await this.app.vault.create(norm, content);
+            }
+          };
+          const sectionNote = (s) => {
+            const siblings = SECTIONS.filter((x) => x !== s).map((x) => `[[${x}]]`).join(" \xB7 ");
+            const lines = [
+              "---",
+              "cssclasses:",
+              "  - agent-brain",
+              "---",
+              `# ${s}`,
+              "",
+              `Part of [[Brain Index]] \xB7 ${siblings}`,
+              ""
+            ];
+            if (!buckets[s].length)
+              lines.push("*Empty \u2014 facts will appear here as the agent learns.*");
+            for (const k of buckets[s])
+              lines.push(`- **${k}**: ${facts[k]}`);
+            lines.push("", `*Last sync: ${stamp}*`);
+            return lines.join("\n") + "\n";
+          };
+          for (const s of SECTIONS)
+            await writeNote(`${DIR}/${s}.md`, sectionNote(s));
+          const idx = [
+            "---",
+            "cssclasses:",
+            "  - agent-brain",
+            "---",
+            "# Brain Index",
+            "",
+            "The agent's memory, organized like a brain. Each section is a lobe; edit any fact line to update the agent.",
+            ""
+          ];
+          for (const s of SECTIONS)
+            idx.push(`- [[${s}]] \u2014 ${buckets[s].length} facts`);
+          idx.push("", `*Last sync: ${stamp}*`);
+          await writeNote(`${DIR}/Brain Index.md`, idx.join("\n") + "\n");
+          const old = this.app.vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(`${DIR}/Agent Brain.md`));
+          if (old instanceof import_obsidian.TFile)
+            await this.app.vault.trash(old, true);
+          return { ...base, ok: true, data: { edits, sections: SECTIONS.length, facts: Object.keys(facts).length } };
+        }
         default:
           throw new Error("unknown action: " + job.action);
       }
