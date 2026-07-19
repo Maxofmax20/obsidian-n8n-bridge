@@ -24413,133 +24413,129 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
     const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
     if (!(file instanceof import_obsidian.TFile))
       return;
-    const frontmatter = (_b = (_a6 = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a6.frontmatter) != null ? _b : {};
-    let watched = Math.max(0, Number(frontmatter.watched) || 0);
-    const episodes = Math.max(0, Number(frontmatter.episodes) || 0);
-    let status = String(frontmatter.status || "Plan to Watch");
-    const malId = Math.max(0, Number(frontmatter.mal_id) || 0);
-    const root = el.createDiv({ cls: "anime-tracker" });
-    const header = root.createDiv({ cls: "anime-tracker__header" });
-    if (malId) {
-      try {
-        const details = await this.getMalAnimeDetails(malId);
-        if (details) {
-          this.renderAnimeHeader(header, details, malId);
-        }
-      } catch (e) {
-        console.debug("Failed to fetch anime details:", e);
-      }
+    const fm = (_b = (_a6 = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a6.frontmatter) != null ? _b : {};
+    let watched = Math.max(0, Number(fm.watched) || 0);
+    const episodes = Math.max(0, Number(fm.episodes) || 0);
+    let status = String(fm.status || "Plan to Watch");
+    const malId = Math.max(0, Number(fm.mal_id) || 0);
+    const accent = String(fm.accent || "#7c5cff");
+    const banner = String(fm.banner || "");
+    const poster = String(fm.poster || "");
+    const title = String(fm.english_title || fm.title || file.basename);
+    const nativeTitle = String(fm.title || "");
+    const malScore = Number(fm.mal_score) || 0;
+    const genres = Array.isArray(fm.genres) ? fm.genres.map(String) : [];
+    const year = String(fm.start_date || "").slice(0, 4);
+    const root = el.createDiv({ cls: "anime-hero is-locked" });
+    root.style.setProperty("--accent", accent);
+    const hero = root.createDiv({ cls: "anime-hero__banner" });
+    if (banner)
+      hero.createEl("img", { cls: "anime-hero__banner-img", attr: { src: banner, alt: "", loading: "lazy" } });
+    hero.createDiv({ cls: "anime-hero__banner-shade" });
+    if (malScore > 0) {
+      const gem = hero.createDiv({ cls: "anime-hero__gem" });
+      gem.createSpan({ cls: "anime-hero__gem-score", text: malScore.toFixed(1) });
+      gem.createSpan({ cls: "anime-hero__gem-label", text: "MAL" });
     }
-    const progressSection = root.createDiv({ cls: "anime-tracker__section anime-tracker__section--progress" });
-    const progressHeader = progressSection.createDiv({ cls: "anime-tracker__section-header" });
-    progressHeader.createDiv({ cls: "anime-tracker__eyebrow", text: "YOUR PROGRESS" });
-    const progressMain = progressSection.createDiv({ cls: "anime-tracker__progress-main" });
-    const count = progressMain.createDiv({ cls: "anime-tracker__count" });
-    const watchedEl = count.createSpan({ text: String(watched), cls: "anime-tracker__watched" });
-    count.createSpan({ cls: "anime-tracker__total", text: ` / ${episodes || "?"} episodes` });
-    const syncState = progressHeader.createDiv({ cls: "anime-tracker__sync" });
-    const setSyncState = (text, mode = "") => {
-      syncState.setText(text);
-      syncState.className = `anime-tracker__sync ${mode}`.trim();
+    const lockBtn = hero.createEl("button", { cls: "anime-hero__lock", attr: { "aria-label": "Edit tracker" } });
+    (0, import_obsidian.setIcon)(lockBtn, "pencil");
+    lockBtn.addEventListener("click", () => {
+      const locked = root.hasClass("is-locked");
+      root.toggleClass("is-locked", !locked);
+      (0, import_obsidian.setIcon)(lockBtn, locked ? "check" : "pencil");
+    });
+    const head = root.createDiv({ cls: "anime-hero__head" });
+    const posterBox = head.createDiv({ cls: "anime-hero__poster" });
+    if (poster)
+      posterBox.createEl("img", { cls: "anime-hero__poster-img", attr: { src: poster, alt: title, loading: "lazy" } });
+    const titles = head.createDiv({ cls: "anime-hero__titles" });
+    titles.createEl("h2", { cls: "anime-hero__title", text: title });
+    if (nativeTitle && nativeTitle !== title)
+      titles.createDiv({ cls: "anime-hero__native", text: nativeTitle });
+    const chips = titles.createDiv({ cls: "anime-hero__chips" });
+    if (year)
+      chips.createSpan({ cls: "anime-hero__chip", text: year });
+    if (episodes)
+      chips.createSpan({ cls: "anime-hero__chip", text: `${episodes} eps` });
+    for (const g of genres.slice(0, 3))
+      chips.createSpan({ cls: "anime-hero__chip anime-hero__chip--genre", text: g });
+    if (malId)
+      titles.createEl("a", {
+        cls: "anime-hero__mal",
+        text: "MyAnimeList \u2197",
+        href: `https://myanimelist.net/anime/${malId}`,
+        attr: { target: "_blank", rel: "noopener noreferrer" }
+      });
+    const prog = root.createDiv({ cls: "anime-hero__progress" });
+    const progTop = prog.createDiv({ cls: "anime-hero__progress-top" });
+    const countEl = progTop.createDiv({ cls: "anime-hero__count" });
+    const watchedEl = countEl.createSpan({ cls: "anime-hero__watched", text: String(watched) });
+    countEl.createSpan({ cls: "anime-hero__total", text: ` / ${episodes || "?"} eps` });
+    const sync = progTop.createDiv({ cls: "anime-hero__sync" });
+    const setSync = (text, mode = "") => {
+      sync.setText(text);
+      sync.className = `anime-hero__sync ${mode}`.trim();
     };
-    setSyncState(
-      this.settings.malAccessToken ? "MAL connected" : "Local only",
-      this.settings.malAccessToken ? "is-connected" : ""
-    );
-    const progressBarWrap = progressSection.createDiv({ cls: "anime-tracker__progress-bar-wrap" });
-    const progress = progressBarWrap.createEl("input", {
-      cls: "anime-tracker__range",
-      type: "range",
-      attr: { "aria-label": "Episodes watched" }
-    });
-    progress.min = "0";
-    progress.max = String(episodes || 999);
-    progress.step = "1";
-    progress.value = String(watched);
-    const quick = progressSection.createDiv({ cls: "anime-tracker__quick" });
-    const minus = quick.createEl("button", {
-      cls: "anime-tracker__quick-btn",
-      attr: { "aria-label": "Remove one episode" }
-    });
+    setSync(this.settings.malAccessToken ? "MAL \u2713" : "local", this.settings.malAccessToken ? "is-on" : "");
+    const setPct = () => root.style.setProperty("--pct", episodes ? `${Math.min(100, Math.round(watched / episodes * 100))}%` : "0%");
+    setPct();
+    const barWrap = prog.createDiv({ cls: "anime-hero__bar-wrap" });
+    const minus = barWrap.createEl("button", { cls: "anime-hero__step", attr: { "aria-label": "Minus one episode" } });
     (0, import_obsidian.setIcon)(minus, "minus");
-    const plus = quick.createEl("button", {
-      cls: "anime-tracker__quick-btn",
-      attr: { "aria-label": "Add one episode" }
-    });
+    const range = barWrap.createEl("input", { cls: "anime-hero__range", type: "range", attr: { "aria-label": "Episodes watched" } });
+    range.min = "0";
+    range.max = String(episodes || 999);
+    range.step = "1";
+    range.value = String(watched);
+    const plus = barWrap.createEl("button", { cls: "anime-hero__step", attr: { "aria-label": "Plus one episode" } });
     (0, import_obsidian.setIcon)(plus, "plus");
-    if (episodes > 0) {
-      const statsSection = root.createDiv({ cls: "anime-tracker__section anime-tracker__section--stats" });
-      const statsGrid = statsSection.createDiv({ cls: "anime-tracker__stats-grid" });
-      const percent = Math.round(watched / episodes * 100);
-      const remaining = episodes - watched;
-      this.createStatCard(statsGrid, "Progress", `${percent}%`, "percent");
-      this.createStatCard(statsGrid, "Watched", `${watched}/${episodes}`, "watched");
-      this.createStatCard(statsGrid, "Remaining", `${remaining} eps`, "remaining");
-      this.createStatCard(statsGrid, "Status", status, "status");
-    }
-    const divider = root.createDiv({ cls: "anime-tracker__divider" });
-    divider.setAttribute("aria-hidden", "true");
-    const statusSection = root.createDiv({ cls: "anime-tracker__section anime-tracker__section--status" });
-    statusSection.createDiv({ cls: "anime-tracker__label", text: "LIST STATUS" });
-    const actions = statusSection.createDiv({ cls: "anime-tracker__actions" });
+    const pills = root.createDiv({ cls: "anime-hero__pills" });
+    const pillEls = [];
     let busy = false;
     const persist = async (nextWatched, nextStatus) => {
-      var _a7, _b2, _c, _d;
       if (busy)
         return;
       busy = true;
       watched = Math.max(0, Math.min(nextWatched, episodes || 999));
       status = nextStatus;
       watchedEl.setText(String(watched));
-      progress.value = String(watched);
-      if (episodes > 0) {
-        const percent = Math.round(watched / episodes * 100);
-        const remaining = episodes - watched;
-        (_a7 = root.querySelector(".anime-tracker__stat--percent .anime-tracker__stat-value")) == null ? void 0 : _a7.setText(`${percent}%`);
-        (_b2 = root.querySelector(".anime-tracker__stat--watched .anime-tracker__stat-value")) == null ? void 0 : _b2.setText(`${watched}/${episodes}`);
-        (_c = root.querySelector(".anime-tracker__stat--remaining .anime-tracker__stat-value")) == null ? void 0 : _c.setText(`${remaining} eps`);
-        (_d = root.querySelector(".anime-tracker__stat--status .anime-tracker__stat-value")) == null ? void 0 : _d.setText(status);
-      }
-      setSyncState(this.settings.malAccessToken && malId ? "Syncing..." : "Saved locally");
+      range.value = String(watched);
+      setPct();
+      pillEls.forEach((p) => p.toggleClass("is-active", p.getText() === status));
+      setSync(this.settings.malAccessToken && malId ? "syncing\u2026" : "saved");
       try {
-        await this.app.fileManager.processFrontMatter(file, (fm) => {
-          fm.watched = watched;
-          fm.status = status;
+        await this.app.fileManager.processFrontMatter(file, (f) => {
+          f.watched = watched;
+          f.status = status;
         });
         if (this.settings.malAccessToken && malId) {
           await this.updateMalList(malId, watched, status);
-          setSyncState("Synced with MAL", "is-connected");
+          setSync("MAL \u2713", "is-on");
         } else {
-          setSyncState(malId ? "Saved locally" : "Missing MAL ID");
+          setSync(malId ? "saved" : "no MAL id");
         }
       } catch (error2) {
-        setSyncState("Sync failed", "is-error");
+        setSync("sync failed", "is-err");
         new import_obsidian.Notice("Anime tracker: " + errMsg(error2));
       } finally {
         busy = false;
       }
     };
-    progress.addEventListener("change", () => persist(Number(progress.value), status));
+    for (const label of Object.keys(MAL_STATUS)) {
+      const pill = pills.createEl("button", { text: label, cls: "anime-hero__pill" });
+      if (label === status)
+        pill.addClass("is-active");
+      pill.addEventListener("click", () => persist(watched, label));
+      pillEls.push(pill);
+    }
+    range.addEventListener("change", () => persist(Number(range.value), status));
     minus.addEventListener("click", () => persist(watched - 1, status));
     plus.addEventListener("click", () => persist(watched + 1, status));
-    for (const label of Object.keys(MAL_STATUS)) {
-      const button = actions.createEl("button", { text: label, cls: "anime-tracker__status-btn" });
-      if (label === status)
-        button.addClass("is-active");
-      button.addEventListener("click", async () => {
-        await persist(watched, label);
-        actions.querySelectorAll("button").forEach(
-          (item) => item.toggleClass("is-active", item === button)
-        );
-      });
-    }
-    const searchSection = root.createDiv({ cls: "anime-tracker__section anime-tracker__section--search" });
-    const searchHeader = searchSection.createDiv({ cls: "anime-tracker__section-header" });
-    searchHeader.createDiv({ cls: "anime-tracker__eyebrow", text: "DISCOVER" });
+    const searchSection = root.createDiv({ cls: "anime-hero__search" });
     const searchInput = searchSection.createEl("input", {
-      cls: "anime-tracker__search-input",
+      cls: "anime-hero__search-input",
       type: "search",
-      placeholder: "Search anime on MyAnimeList\u2026",
+      placeholder: "Search MyAnimeList\u2026",
       attr: { "aria-label": "Search anime" }
     });
     const searchResults = searchSection.createDiv({ cls: "anime-tracker__search-results" });
@@ -24554,74 +24550,24 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       }
       searchDebounce = window.setTimeout(() => this.performAnimeSearch(query, searchResults, file, malId), 300);
     });
-    const footer = root.createDiv({ cls: "anime-tracker__footer" });
     if (this.settings.malAccessToken && malId) {
-      const pull = footer.createEl("button", {
-        text: "Pull from MyAnimeList",
-        cls: "anime-tracker__footer-btn"
-      });
+      const footer = root.createDiv({ cls: "anime-hero__footer" });
+      const pull = footer.createEl("button", { text: "Pull from MyAnimeList", cls: "anime-hero__pull" });
       pull.addEventListener("click", async () => {
         var _a7;
         try {
-          setSyncState("Loading MAL...");
+          setSync("loading\u2026");
           const remote = await this.getMalListStatus(malId);
           if (!remote)
             throw new Error("This anime is not on your MAL list yet.");
-          const localStatus = (_a7 = Object.keys(MAL_STATUS).find(
-            (key) => MAL_STATUS[key] === remote.status
-          )) != null ? _a7 : "Plan to Watch";
+          const localStatus = (_a7 = Object.keys(MAL_STATUS).find((k) => MAL_STATUS[k] === remote.status)) != null ? _a7 : "Plan to Watch";
           await persist(remote.num_episodes_watched || 0, localStatus);
         } catch (error2) {
-          setSyncState("Pull failed", "is-error");
+          setSync("pull failed", "is-err");
           new import_obsidian.Notice("MyAnimeList: " + errMsg(error2));
         }
       });
-    } else if (!this.settings.malAccessToken) {
-      footer.createSpan({ text: "Connect MyAnimeList in n8n Bridge settings to sync." });
-    } else {
-      footer.createSpan({ text: "Add mal_id to this note to enable sync." });
     }
-  }
-  renderAnimeHeader(header, details, malId) {
-    var _a6, _b, _c;
-    if ((_a6 = details.main_picture) == null ? void 0 : _a6.medium) {
-      const cover = header.createDiv({ cls: "anime-tracker__cover" });
-      cover.createEl("img", {
-        cls: "anime-tracker__cover-img",
-        attr: { src: details.main_picture.medium, alt: details.title }
-      });
-    }
-    const info = header.createDiv({ cls: "anime-tracker__info" });
-    info.createEl("h3", { cls: "anime-tracker__title", text: details.title });
-    if ((_b = details.alternative_titles) == null ? void 0 : _b.en) {
-      info.createDiv({ cls: "anime-tracker__alt-title", text: details.alternative_titles.en });
-    }
-    const meta2 = info.createDiv({ cls: "anime-tracker__meta" });
-    if (details.num_episodes > 0) {
-      meta2.createSpan({ cls: "anime-tracker__meta-item", text: `${details.num_episodes} eps` });
-    }
-    if (details.mean > 0) {
-      meta2.createSpan({ cls: "anime-tracker__meta-item", text: `\u2605 ${details.mean.toFixed(2)}` });
-    }
-    if (details.status) {
-      const statusText = details.status.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
-      meta2.createSpan({ cls: "anime-tracker__meta-item", text: statusText });
-    }
-    if ((_c = details.genres) == null ? void 0 : _c.length) {
-      const genres = details.genres.slice(0, 3).map((g) => g.name).join(", ");
-      meta2.createSpan({ cls: "anime-tracker__meta-item", text: genres });
-    }
-    const link = info.createEl("a", {
-      cls: "anime-tracker__mal-link",
-      href: `https://myanimelist.net/anime/${malId}`,
-      text: "Open on MyAnimeList \u2197",
-      attr: { target: "_blank", rel: "noopener noreferrer" }
-    });
-  }
-  createStatCard(grid, label, value, type) {
-    const card = grid.createDiv({ cls: `anime-tracker__stat anime-tracker__stat--${type}` });
-    card.createDiv({ cls: "anime-tracker__stat-value", text: value });
-    card.createDiv({ cls: "anime-tracker__stat-label", text: label });
   }
   async performAnimeSearch(query, resultsEl, file, currentMalId) {
     resultsEl.empty();
@@ -24877,6 +24823,41 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
     }
     return entries;
   }
+  /** Hub note name for a local status — used for graph-view clustering. */
+  statusHubName(status) {
+    return status.includes("On Hold") ? "On Hold" : status;
+  }
+  /**
+   * Batch-fetch AniList banner image + dominant color for MAL ids.
+   * Chunks of 50 per request; failures degrade to empty (no banner/accent).
+   */
+  async fetchAniListMeta(ids) {
+    var _a6, _b, _c, _d;
+    const out = {};
+    const query = "query($ids:[Int]){Page(perPage:50){media(idMal_in:$ids,type:ANIME){idMal bannerImage coverImage{color}}}}";
+    for (let i = 0; i < ids.length; i += 50) {
+      const chunk = ids.slice(i, i + 50);
+      try {
+        const resp = await (0, import_obsidian.requestUrl)({
+          url: "https://graphql.anilist.co",
+          method: "POST",
+          contentType: "application/json",
+          body: JSON.stringify({ query, variables: { ids: chunk } }),
+          throw: false
+        });
+        const media = ((_c = (_b = (_a6 = resp.json) == null ? void 0 : _a6.data) == null ? void 0 : _b.Page) == null ? void 0 : _c.media) || [];
+        for (const m of media) {
+          if (m == null ? void 0 : m.idMal)
+            out[m.idMal] = { banner: m.bannerImage || "", color: ((_d = m.coverImage) == null ? void 0 : _d.color) || "" };
+        }
+      } catch (e) {
+        console.warn("AniList meta fetch failed for chunk", i, e);
+      }
+      if (i + 50 < ids.length)
+        await new Promise((r) => window.setTimeout(r, 700));
+    }
+    return out;
+  }
   async importFullMalLibrary() {
     if (!this.settings.malAccessToken) {
       new import_obsidian.Notice("Connect MyAnimeList in n8n Bridge settings first.");
@@ -24887,13 +24868,23 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       const entries = await this.fetchFullMalList();
       await this.ensureVaultFolder("Anime Library");
       await this.ensureVaultFolder("Anime Library/Shows");
+      await this.ensureVaultFolder("Anime Library/Hubs");
+      notice.setMessage("Fetching banners & colors from AniList...");
+      const meta2 = await this.fetchAniListMeta(entries.map((e) => e.node.id));
       let created = 0;
       let updated = 0;
+      const genresSeen = /* @__PURE__ */ new Set();
       for (let index = 0; index < entries.length; index++) {
         const entry = entries[index];
+        for (const g of entry.node.genres || [])
+          genresSeen.add(g.name);
         const path = `Anime Library/Shows/${this.animeFileName(entry.node.title, entry.node.id)}.md`;
         const existing = this.app.vault.getAbstractFileByPath(path);
-        const content = this.buildAnimeNote(entry, existing instanceof import_obsidian.TFile ? await this.app.vault.read(existing) : "");
+        const content = this.buildAnimeNote(
+          entry,
+          existing instanceof import_obsidian.TFile ? await this.app.vault.read(existing) : "",
+          meta2[entry.node.id]
+        );
         if (existing instanceof import_obsidian.TFile) {
           await this.app.vault.modify(existing, content);
           updated++;
@@ -24903,6 +24894,20 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
         }
         if ((index + 1) % 25 === 0)
           notice.setMessage(`Imported ${index + 1} of ${entries.length} anime...`);
+      }
+      const hubs = ["Watching", "Watched", "Plan to Watch", "On Hold", "Dropped", ...genresSeen];
+      for (const hub of hubs) {
+        const hubPath = `Anime Library/Hubs/${hub.replace(/[\\/:*?"<>|]/g, "-")}.md`;
+        if (!this.app.vault.getAbstractFileByPath(hubPath)) {
+          await this.app.vault.create(hubPath, `---
+cssclasses:
+  - anime-hub
+---
+# ${hub}
+
+All anime linked here appear in the graph view as one cluster.
+`);
+        }
       }
       const dashboardPath = "Anime Library/Anime Library.md";
       const dashboard = [
@@ -24991,7 +24996,7 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
   localAnimeStatus(status) {
     return Object.keys(MAL_STATUS).find((label) => MAL_STATUS[label] === status) || (status === "dropped" ? "Dropped" : status.replace(/_/g, " "));
   }
-  buildAnimeNote(entry, existing) {
+  buildAnimeNote(entry, existing, anilist) {
     var _a6, _b, _c;
     const anime = entry.node;
     const list = entry.list_status || anime.my_list_status || {};
@@ -24999,6 +25004,11 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
     const personal = existing.includes(marker) ? existing.split(marker).slice(1).join(marker).trimStart() : "";
     const genres = (anime.genres || []).map((genre) => this.yamlString(genre.name)).join(", ");
     const englishTitle = ((_a6 = anime.alternative_titles) == null ? void 0 : _a6.en) || "";
+    const localStatus = this.localAnimeStatus(list.status || "plan_to_watch");
+    const hubLinks = [
+      `[[${this.statusHubName(localStatus)}]]`,
+      ...(anime.genres || []).map((g) => `[[${g.name.replace(/[\\/:*?"<>|]/g, "-")}]]`)
+    ].join(" \xB7 ");
     const note = [
       "---",
       "type: anime",
@@ -25006,8 +25016,10 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       `title: ${this.yamlString(anime.title)}`,
       `english_title: ${this.yamlString(englishTitle)}`,
       `poster: ${this.yamlString(((_b = anime.main_picture) == null ? void 0 : _b.large) || ((_c = anime.main_picture) == null ? void 0 : _c.medium) || "")}`,
+      `banner: ${this.yamlString((anilist == null ? void 0 : anilist.banner) || "")}`,
+      `accent: ${this.yamlString((anilist == null ? void 0 : anilist.color) || "")}`,
       `mal_url: ${this.yamlString(`https://myanimelist.net/anime/${anime.id}`)}`,
-      `status: ${this.yamlString(this.localAnimeStatus(list.status || "plan_to_watch"))}`,
+      `status: ${this.yamlString(localStatus)}`,
       `mal_status: ${this.yamlString(list.status || "plan_to_watch")}`,
       `watched: ${Math.max(0, Number(list.num_episodes_watched) || 0)}`,
       `episodes: ${Math.max(0, Number(anime.num_episodes) || 0)}`,
@@ -25021,13 +25033,15 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       "cssclasses:",
       "  - anime-detail",
       "---",
-      `# ${englishTitle || anime.title}`,
       "",
       "```anime-tracker",
       "```",
       "",
       marker,
-      personal || "\n## Notes\n"
+      personal || "\n## Notes\n",
+      "",
+      "---",
+      `*Library:* ${hubLinks}`
     ].join("\n");
     return note.endsWith("\n") ? note : note + "\n";
   }

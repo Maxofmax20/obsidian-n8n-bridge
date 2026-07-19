@@ -349,92 +349,85 @@ export default class N8nBridgePlugin extends Plugin {
 	private async renderAnimeTracker(el: HTMLElement, ctx: MarkdownPostProcessorContext) {
 		const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
 		if (!(file instanceof TFile)) return;
-		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
-		let watched = Math.max(0, Number(frontmatter.watched) || 0);
-		const episodes = Math.max(0, Number(frontmatter.episodes) || 0);
-		let status = String(frontmatter.status || "Plan to Watch");
-		const malId = Math.max(0, Number(frontmatter.mal_id) || 0);
+		const fm = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+		let watched = Math.max(0, Number(fm.watched) || 0);
+		const episodes = Math.max(0, Number(fm.episodes) || 0);
+		let status = String(fm.status || "Plan to Watch");
+		const malId = Math.max(0, Number(fm.mal_id) || 0);
+		const accent = String(fm.accent || "#7c5cff");
+		const banner = String(fm.banner || "");
+		const poster = String(fm.poster || "");
+		const title = String(fm.english_title || fm.title || file.basename);
+		const nativeTitle = String(fm.title || "");
+		const malScore = Number(fm.mal_score) || 0;
+		const genres: string[] = Array.isArray(fm.genres) ? fm.genres.map(String) : [];
+		const year = String(fm.start_date || "").slice(0, 4);
 
-		const root = el.createDiv({ cls: "anime-tracker" });
+		const root = el.createDiv({ cls: "anime-hero is-locked" });
+		root.style.setProperty("--accent", accent);
 
-		// ── Header with anime info ──────────────────────────────────────
-		const header = root.createDiv({ cls: "anime-tracker__header" });
-		
-		// If we have a MAL ID, fetch and show anime details
-		if (malId) {
-			try {
-				const details = await this.getMalAnimeDetails(malId);
-				if (details) {
-					this.renderAnimeHeader(header, details, malId);
-				}
-			} catch (e) {
-				console.debug("Failed to fetch anime details:", e);
-			}
+		// ── Hero banner ─────────────────────────────────────────────
+		const hero = root.createDiv({ cls: "anime-hero__banner" });
+		if (banner) hero.createEl("img", { cls: "anime-hero__banner-img", attr: { src: banner, alt: "", loading: "lazy" } });
+		hero.createDiv({ cls: "anime-hero__banner-shade" });
+
+		if (malScore > 0) {
+			const gem = hero.createDiv({ cls: "anime-hero__gem" });
+			gem.createSpan({ cls: "anime-hero__gem-score", text: malScore.toFixed(1) });
+			gem.createSpan({ cls: "anime-hero__gem-label", text: "MAL" });
 		}
 
-		// ── Progress Section ───────────────────────────────────────────
-		const progressSection = root.createDiv({ cls: "anime-tracker__section anime-tracker__section--progress" });
-		const progressHeader = progressSection.createDiv({ cls: "anime-tracker__section-header" });
-		progressHeader.createDiv({ cls: "anime-tracker__eyebrow", text: "YOUR PROGRESS" });
-		
-		const progressMain = progressSection.createDiv({ cls: "anime-tracker__progress-main" });
-		const count = progressMain.createDiv({ cls: "anime-tracker__count" });
-		const watchedEl = count.createSpan({ text: String(watched), cls: "anime-tracker__watched" });
-		count.createSpan({ cls: "anime-tracker__total", text: ` / ${episodes || "?"} episodes` });
-		
-		const syncState = progressHeader.createDiv({ cls: "anime-tracker__sync" });
-		const setSyncState = (text: string, mode = "") => {
-			syncState.setText(text);
-			syncState.className = `anime-tracker__sync ${mode}`.trim();
-		};
-		setSyncState(
-			this.settings.malAccessToken ? "MAL connected" : "Local only",
-			this.settings.malAccessToken ? "is-connected" : ""
-		);
-
-		const progressBarWrap = progressSection.createDiv({ cls: "anime-tracker__progress-bar-wrap" });
-		const progress = progressBarWrap.createEl("input", { 
-			cls: "anime-tracker__range", 
-			type: "range",
-			attr: { "aria-label": "Episodes watched" }
+		// Edit lock: card is read-only until unlocked, so casual scrolling
+		// can't nudge the slider or change status.
+		const lockBtn = hero.createEl("button", { cls: "anime-hero__lock", attr: { "aria-label": "Edit tracker" } });
+		setIcon(lockBtn, "pencil");
+		lockBtn.addEventListener("click", () => {
+			const locked = root.hasClass("is-locked");
+			root.toggleClass("is-locked", !locked);
+			setIcon(lockBtn, locked ? "check" : "pencil");
 		});
-		progress.min = "0";
-		progress.max = String(episodes || 999);
-		progress.step = "1";
-		progress.value = String(watched);
 
-		const quick = progressSection.createDiv({ cls: "anime-tracker__quick" });
-		const minus = quick.createEl("button", { 
-			cls: "anime-tracker__quick-btn", 
-			attr: { "aria-label": "Remove one episode" } 
+		// ── Poster + titles ─────────────────────────────────────────
+		const head = root.createDiv({ cls: "anime-hero__head" });
+		const posterBox = head.createDiv({ cls: "anime-hero__poster" });
+		if (poster) posterBox.createEl("img", { cls: "anime-hero__poster-img", attr: { src: poster, alt: title, loading: "lazy" } });
+		const titles = head.createDiv({ cls: "anime-hero__titles" });
+		titles.createEl("h2", { cls: "anime-hero__title", text: title });
+		if (nativeTitle && nativeTitle !== title) titles.createDiv({ cls: "anime-hero__native", text: nativeTitle });
+		const chips = titles.createDiv({ cls: "anime-hero__chips" });
+		if (year) chips.createSpan({ cls: "anime-hero__chip", text: year });
+		if (episodes) chips.createSpan({ cls: "anime-hero__chip", text: `${episodes} eps` });
+		for (const g of genres.slice(0, 3)) chips.createSpan({ cls: "anime-hero__chip anime-hero__chip--genre", text: g });
+		if (malId) titles.createEl("a", {
+			cls: "anime-hero__mal", text: "MyAnimeList ↗",
+			href: `https://myanimelist.net/anime/${malId}`,
+			attr: { target: "_blank", rel: "noopener noreferrer" },
 		});
+
+		// ── Progress ────────────────────────────────────────────────
+		const prog = root.createDiv({ cls: "anime-hero__progress" });
+		const progTop = prog.createDiv({ cls: "anime-hero__progress-top" });
+		const countEl = progTop.createDiv({ cls: "anime-hero__count" });
+		const watchedEl = countEl.createSpan({ cls: "anime-hero__watched", text: String(watched) });
+		countEl.createSpan({ cls: "anime-hero__total", text: ` / ${episodes || "?"} eps` });
+		const sync = progTop.createDiv({ cls: "anime-hero__sync" });
+		const setSync = (text: string, mode = "") => { sync.setText(text); sync.className = `anime-hero__sync ${mode}`.trim(); };
+		setSync(this.settings.malAccessToken ? "MAL ✓" : "local", this.settings.malAccessToken ? "is-on" : "");
+
+		const setPct = () => root.style.setProperty("--pct", episodes ? `${Math.min(100, Math.round((watched / episodes) * 100))}%` : "0%");
+		setPct();
+
+		const barWrap = prog.createDiv({ cls: "anime-hero__bar-wrap" });
+		const minus = barWrap.createEl("button", { cls: "anime-hero__step", attr: { "aria-label": "Minus one episode" } });
 		setIcon(minus, "minus");
-		const plus = quick.createEl("button", { 
-			cls: "anime-tracker__quick-btn", 
-			attr: { "aria-label": "Add one episode" } 
-		});
+		const range = barWrap.createEl("input", { cls: "anime-hero__range", type: "range", attr: { "aria-label": "Episodes watched" } });
+		range.min = "0"; range.max = String(episodes || 999); range.step = "1"; range.value = String(watched);
+		const plus = barWrap.createEl("button", { cls: "anime-hero__step", attr: { "aria-label": "Plus one episode" } });
 		setIcon(plus, "plus");
 
-		// ── Stats Section ──────────────────────────────────────────────
-		if (episodes > 0) {
-			const statsSection = root.createDiv({ cls: "anime-tracker__section anime-tracker__section--stats" });
-			const statsGrid = statsSection.createDiv({ cls: "anime-tracker__stats-grid" });
-			
-			const percent = Math.round((watched / episodes) * 100);
-			const remaining = episodes - watched;
-			
-			this.createStatCard(statsGrid, "Progress", `${percent}%`, "percent");
-			this.createStatCard(statsGrid, "Watched", `${watched}/${episodes}`, "watched");
-			this.createStatCard(statsGrid, "Remaining", `${remaining} eps`, "remaining");
-			this.createStatCard(statsGrid, "Status", status, "status");
-		}
-
-		// ── Status Section ─────────────────────────────────────────────
-		const divider = root.createDiv({ cls: "anime-tracker__divider" });
-		divider.setAttribute("aria-hidden", "true");
-		const statusSection = root.createDiv({ cls: "anime-tracker__section anime-tracker__section--status" });
-		statusSection.createDiv({ cls: "anime-tracker__label", text: "LIST STATUS" });
-		const actions = statusSection.createDiv({ cls: "anime-tracker__actions" });
+		// ── Status pills ────────────────────────────────────────────
+		const pills = root.createDiv({ cls: "anime-hero__pills" });
+		const pillEls: HTMLElement[] = [];
 
 		let busy = false;
 		const persist = async (nextWatched: number, nextStatus: string) => {
@@ -443,155 +436,73 @@ export default class N8nBridgePlugin extends Plugin {
 			watched = Math.max(0, Math.min(nextWatched, episodes || 999));
 			status = nextStatus;
 			watchedEl.setText(String(watched));
-			progress.value = String(watched);
-			
-			// Update stats if visible
-			if (episodes > 0) {
-				const percent = Math.round((watched / episodes) * 100);
-				const remaining = episodes - watched;
-				root.querySelector(".anime-tracker__stat--percent .anime-tracker__stat-value")?.setText(`${percent}%`);
-				root.querySelector(".anime-tracker__stat--watched .anime-tracker__stat-value")?.setText(`${watched}/${episodes}`);
-				root.querySelector(".anime-tracker__stat--remaining .anime-tracker__stat-value")?.setText(`${remaining} eps`);
-				root.querySelector(".anime-tracker__stat--status .anime-tracker__stat-value")?.setText(status);
-			}
-			
-			setSyncState(this.settings.malAccessToken && malId ? "Syncing..." : "Saved locally");
+			range.value = String(watched);
+			setPct();
+			pillEls.forEach((p) => p.toggleClass("is-active", p.getText() === status));
+			setSync(this.settings.malAccessToken && malId ? "syncing…" : "saved");
 			try {
-				await this.app.fileManager.processFrontMatter(file, (fm) => {
-					fm.watched = watched;
-					fm.status = status;
+				await this.app.fileManager.processFrontMatter(file, (f) => {
+					f.watched = watched;
+					f.status = status;
 				});
 				if (this.settings.malAccessToken && malId) {
 					await this.updateMalList(malId, watched, status);
-					setSyncState("Synced with MAL", "is-connected");
+					setSync("MAL ✓", "is-on");
 				} else {
-					setSyncState(malId ? "Saved locally" : "Missing MAL ID");
+					setSync(malId ? "saved" : "no MAL id");
 				}
 			} catch (error) {
-				setSyncState("Sync failed", "is-error");
+				setSync("sync failed", "is-err");
 				new Notice("Anime tracker: " + errMsg(error));
 			} finally {
 				busy = false;
 			}
 		};
 
-		progress.addEventListener("change", () => persist(Number(progress.value), status));
-		minus.addEventListener("click", () => persist(watched - 1, status));
-		plus.addEventListener("click", () => persist(watched + 1, status));
-		
 		for (const label of Object.keys(MAL_STATUS)) {
-			const button = actions.createEl("button", { text: label, cls: "anime-tracker__status-btn" });
-			if (label === status) button.addClass("is-active");
-			button.addEventListener("click", async () => {
-				await persist(watched, label);
-				actions.querySelectorAll("button").forEach((item) =>
-					item.toggleClass("is-active", item === button)
-				);
-			});
+			const pill = pills.createEl("button", { text: label, cls: "anime-hero__pill" });
+			if (label === status) pill.addClass("is-active");
+			pill.addEventListener("click", () => persist(watched, label));
+			pillEls.push(pill);
 		}
 
-		// ── Search Section ─────────────────────────────────────────────
-		const searchSection = root.createDiv({ cls: "anime-tracker__section anime-tracker__section--search" });
-		const searchHeader = searchSection.createDiv({ cls: "anime-tracker__section-header" });
-		searchHeader.createDiv({ cls: "anime-tracker__eyebrow", text: "DISCOVER" });
-		
+		range.addEventListener("change", () => persist(Number(range.value), status));
+		minus.addEventListener("click", () => persist(watched - 1, status));
+		plus.addEventListener("click", () => persist(watched + 1, status));
+
+		// ── Search (edit mode only) ─────────────────────────────────
+		const searchSection = root.createDiv({ cls: "anime-hero__search" });
 		const searchInput = searchSection.createEl("input", {
-			cls: "anime-tracker__search-input",
-			type: "search",
-			placeholder: "Search anime on MyAnimeList…",
-			attr: { "aria-label": "Search anime" }
+			cls: "anime-hero__search-input", type: "search",
+			placeholder: "Search MyAnimeList…",
+			attr: { "aria-label": "Search anime" },
 		});
-		
 		const searchResults = searchSection.createDiv({ cls: "anime-tracker__search-results" });
 		let searchDebounce: number;
-		
 		searchInput.addEventListener("input", () => {
 			clearTimeout(searchDebounce);
 			const query = searchInput.value.trim();
-			if (query.length < 2) {
-				searchResults.empty();
-				searchResults.removeClass("has-results");
-				return;
-			}
+			if (query.length < 2) { searchResults.empty(); searchResults.removeClass("has-results"); return; }
 			searchDebounce = window.setTimeout(() => this.performAnimeSearch(query, searchResults, file, malId), 300);
 		});
 
-		// ── Footer ─────────────────────────────────────────────────────
-		const footer = root.createDiv({ cls: "anime-tracker__footer" });
+		// ── Footer: pull from MAL (edit mode only) ──────────────────
 		if (this.settings.malAccessToken && malId) {
-			const pull = footer.createEl("button", { 
-				text: "Pull from MyAnimeList",
-				cls: "anime-tracker__footer-btn"
-			});
+			const footer = root.createDiv({ cls: "anime-hero__footer" });
+			const pull = footer.createEl("button", { text: "Pull from MyAnimeList", cls: "anime-hero__pull" });
 			pull.addEventListener("click", async () => {
 				try {
-					setSyncState("Loading MAL...");
+					setSync("loading…");
 					const remote = await this.getMalListStatus(malId);
 					if (!remote) throw new Error("This anime is not on your MAL list yet.");
-					const localStatus = Object.keys(MAL_STATUS).find(
-						(key) => MAL_STATUS[key] === remote.status
-					) ?? "Plan to Watch";
+					const localStatus = Object.keys(MAL_STATUS).find((k) => MAL_STATUS[k] === remote.status) ?? "Plan to Watch";
 					await persist(remote.num_episodes_watched || 0, localStatus);
 				} catch (error) {
-					setSyncState("Pull failed", "is-error");
+					setSync("pull failed", "is-err");
 					new Notice("MyAnimeList: " + errMsg(error));
 				}
 			});
-		} else if (!this.settings.malAccessToken) {
-			footer.createSpan({ text: "Connect MyAnimeList in n8n Bridge settings to sync." });
-		} else {
-			footer.createSpan({ text: "Add mal_id to this note to enable sync." });
 		}
-	}
-
-	private renderAnimeHeader(header: HTMLElement, details: MalAnimeDetails, malId: number) {
-		// Cover image
-		if (details.main_picture?.medium) {
-			const cover = header.createDiv({ cls: "anime-tracker__cover" });
-			cover.createEl("img", {
-				cls: "anime-tracker__cover-img",
-				attr: { src: details.main_picture.medium, alt: details.title }
-			});
-		}
-
-		// Title & meta
-		const info = header.createDiv({ cls: "anime-tracker__info" });
-		info.createEl("h3", { cls: "anime-tracker__title", text: details.title });
-		
-		if (details.alternative_titles?.en) {
-			info.createDiv({ cls: "anime-tracker__alt-title", text: details.alternative_titles.en });
-		}
-
-		const meta = info.createDiv({ cls: "anime-tracker__meta" });
-		
-		if (details.num_episodes > 0) {
-			meta.createSpan({ cls: "anime-tracker__meta-item", text: `${details.num_episodes} eps` });
-		}
-		if (details.mean > 0) {
-			meta.createSpan({ cls: "anime-tracker__meta-item", text: `★ ${details.mean.toFixed(2)}` });
-		}
-		if (details.status) {
-			const statusText = details.status.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
-			meta.createSpan({ cls: "anime-tracker__meta-item", text: statusText });
-		}
-		if (details.genres?.length) {
-			const genres = details.genres.slice(0, 3).map(g => g.name).join(", ");
-			meta.createSpan({ cls: "anime-tracker__meta-item", text: genres });
-		}
-
-		// MAL link
-		const link = info.createEl("a", {
-			cls: "anime-tracker__mal-link",
-			href: `https://myanimelist.net/anime/${malId}`,
-			text: "Open on MyAnimeList ↗",
-			attr: { target: "_blank", rel: "noopener noreferrer" }
-		});
-	}
-
-	private createStatCard(grid: HTMLElement, label: string, value: string, type: string) {
-		const card = grid.createDiv({ cls: `anime-tracker__stat anime-tracker__stat--${type}` });
-		card.createDiv({ cls: "anime-tracker__stat-value", text: value });
-		card.createDiv({ cls: "anime-tracker__stat-label", text: label });
 	}
 
 	private async performAnimeSearch(query: string, resultsEl: HTMLElement, file: TFile, currentMalId: number) {
@@ -851,6 +762,42 @@ export default class N8nBridgePlugin extends Plugin {
 		return entries;
 	}
 
+	/** Hub note name for a local status — used for graph-view clustering. */
+	private statusHubName(status: string): string {
+		return status.includes("On Hold") ? "On Hold" : status;
+	}
+
+	/**
+	 * Batch-fetch AniList banner image + dominant color for MAL ids.
+	 * Chunks of 50 per request; failures degrade to empty (no banner/accent).
+	 */
+	private async fetchAniListMeta(ids: number[]): Promise<Record<number, { banner: string; color: string }>> {
+		const out: Record<number, { banner: string; color: string }> = {};
+		const query =
+			"query($ids:[Int]){Page(perPage:50){media(idMal_in:$ids,type:ANIME){idMal bannerImage coverImage{color}}}}";
+		for (let i = 0; i < ids.length; i += 50) {
+			const chunk = ids.slice(i, i + 50);
+			try {
+				const resp = await requestUrl({
+					url: "https://graphql.anilist.co",
+					method: "POST",
+					contentType: "application/json",
+					body: JSON.stringify({ query, variables: { ids: chunk } }),
+					throw: false,
+				});
+				const media = resp.json?.data?.Page?.media || [];
+				for (const m of media) {
+					if (m?.idMal) out[m.idMal] = { banner: m.bannerImage || "", color: m.coverImage?.color || "" };
+				}
+			} catch (e) {
+				console.warn("AniList meta fetch failed for chunk", i, e);
+			}
+			// AniList rate limit is generous but be polite between chunks.
+			if (i + 50 < ids.length) await new Promise((r) => window.setTimeout(r, 700));
+		}
+		return out;
+	}
+
 	async importFullMalLibrary() {
 		if (!this.settings.malAccessToken) {
 			new Notice("Connect MyAnimeList in n8n Bridge settings first.");
@@ -861,13 +808,22 @@ export default class N8nBridgePlugin extends Plugin {
 			const entries = await this.fetchFullMalList();
 			await this.ensureVaultFolder("Anime Library");
 			await this.ensureVaultFolder("Anime Library/Shows");
+			await this.ensureVaultFolder("Anime Library/Hubs");
+			notice.setMessage("Fetching banners & colors from AniList...");
+			const meta = await this.fetchAniListMeta(entries.map((e) => e.node.id));
 			let created = 0;
 			let updated = 0;
+			const genresSeen = new Set<string>();
 			for (let index = 0; index < entries.length; index++) {
 				const entry = entries[index];
+				for (const g of entry.node.genres || []) genresSeen.add(g.name);
 				const path = `Anime Library/Shows/${this.animeFileName(entry.node.title, entry.node.id)}.md`;
 				const existing = this.app.vault.getAbstractFileByPath(path);
-				const content = this.buildAnimeNote(entry, existing instanceof TFile ? await this.app.vault.read(existing) : "");
+				const content = this.buildAnimeNote(
+					entry,
+					existing instanceof TFile ? await this.app.vault.read(existing) : "",
+					meta[entry.node.id]
+				);
 				if (existing instanceof TFile) {
 					await this.app.vault.modify(existing, content);
 					updated++;
@@ -876,6 +832,15 @@ export default class N8nBridgePlugin extends Plugin {
 					created++;
 				}
 				if ((index + 1) % 25 === 0) notice.setMessage(`Imported ${index + 1} of ${entries.length} anime...`);
+			}
+			// Hub notes: one per status + one per genre. Show notes link to
+			// these, which makes the graph view cluster the library naturally.
+			const hubs = ["Watching", "Watched", "Plan to Watch", "On Hold", "Dropped", ...genresSeen];
+			for (const hub of hubs) {
+				const hubPath = `Anime Library/Hubs/${hub.replace(/[\\/:*?"<>|]/g, "-")}.md`;
+				if (!this.app.vault.getAbstractFileByPath(hubPath)) {
+					await this.app.vault.create(hubPath, `---\ncssclasses:\n  - anime-hub\n---\n# ${hub}\n\nAll anime linked here appear in the graph view as one cluster.\n`);
+				}
 			}
 			const dashboardPath = "Anime Library/Anime Library.md";
 			const dashboard = [
@@ -974,13 +939,20 @@ export default class N8nBridgePlugin extends Plugin {
 			|| (status === "dropped" ? "Dropped" : status.replace(/_/g, " "));
 	}
 
-	private buildAnimeNote(entry: MalListEntry, existing: string): string {
+	private buildAnimeNote(entry: MalListEntry, existing: string, anilist?: { banner: string; color: string }): string {
 		const anime = entry.node;
 		const list = entry.list_status || (anime as any).my_list_status || {};
 		const marker = "<!-- Your notes below this line are preserved during MAL refresh. -->";
 		const personal = existing.includes(marker) ? existing.split(marker).slice(1).join(marker).trimStart() : "";
 		const genres = (anime.genres || []).map((genre) => this.yamlString(genre.name)).join(", ");
 		const englishTitle = anime.alternative_titles?.en || "";
+		const localStatus = this.localAnimeStatus(list.status || "plan_to_watch");
+		// Graph-view links: status hub + genre hubs. Kept in a footer section
+		// so they organize the graph without cluttering the reading view.
+		const hubLinks = [
+			`[[${this.statusHubName(localStatus)}]]`,
+			...(anime.genres || []).map((g) => `[[${g.name.replace(/[\\/:*?"<>|]/g, "-")}]]`),
+		].join(" · ");
 		const note = [
 			"---",
 			"type: anime",
@@ -988,8 +960,10 @@ export default class N8nBridgePlugin extends Plugin {
 			`title: ${this.yamlString(anime.title)}`,
 			`english_title: ${this.yamlString(englishTitle)}`,
 			`poster: ${this.yamlString(anime.main_picture?.large || anime.main_picture?.medium || "")}`,
+			`banner: ${this.yamlString(anilist?.banner || "")}`,
+			`accent: ${this.yamlString(anilist?.color || "")}`,
 			`mal_url: ${this.yamlString(`https://myanimelist.net/anime/${anime.id}`)}`,
-			`status: ${this.yamlString(this.localAnimeStatus(list.status || "plan_to_watch"))}`,
+			`status: ${this.yamlString(localStatus)}`,
 			`mal_status: ${this.yamlString(list.status || "plan_to_watch")}`,
 			`watched: ${Math.max(0, Number(list.num_episodes_watched) || 0)}`,
 			`episodes: ${Math.max(0, Number(anime.num_episodes) || 0)}`,
@@ -1003,13 +977,15 @@ export default class N8nBridgePlugin extends Plugin {
 			"cssclasses:",
 			"  - anime-detail",
 			"---",
-			`# ${englishTitle || anime.title}`,
 			"",
 			"```anime-tracker",
 			"```",
 			"",
 			marker,
 			personal || "\n## Notes\n",
+			"",
+			"---",
+			`*Library:* ${hubLinks}`,
 		].join("\n");
 		return note.endsWith("\n") ? note : note + "\n";
 	}
