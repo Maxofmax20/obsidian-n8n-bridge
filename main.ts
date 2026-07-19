@@ -168,6 +168,9 @@ interface Job {
 		| "write_note"
 		| "append_note"
 		| "create_note"
+		| "delete_note"
+		| "delete_many"
+		| "purge_folder"
 		| "list_notes"
 		| "search_vault"
 		| "mal_token"
@@ -1486,16 +1489,62 @@ export default class N8nBridgePlugin extends Plugin {
 					return { ...base, ok: true, data: { appended: add.length, path } };
 				}
 
-				case "create_note": {
-					let path = this.requirePath(job.path);
-					// don't clobber: if it exists, suffix a counter
-					path = await this.uniquePath(path);
-					await this.ensureFolder(path);
-					await this.app.vault.create(path, job.content ?? "");
-					return { ...base, ok: true, path, data: { path } };
-				}
+case "create_note": {
+				let path = this.requirePath(job.path);
+				// don't clobber: if it exists, suffix a counter
+				path = await this.uniquePath(path);
+				await this.ensureFolder(path);
+				await this.app.vault.create(path, job.content ?? "");
+				return { ...base, ok: true, path, data: { path } };
+			}
 
-				case "list_notes": {
+			case "delete_note": {
+				const path = this.requirePath(job.path);
+				const file = this.app.vault.getAbstractFileByPath(path);
+				if (file instanceof TFile) {
+					await this.app.vault.trash(file, true);
+					return { ...base, ok: true, data: { deleted: true, path } };
+				} else {
+					throw new Error("note not found: " + path);
+				}
+			}
+
+			case "delete_many": {
+				const paths: string[] = job.path ? [job.path] : (job.query ? JSON.parse(job.query) : []);
+				if (!paths.length) throw new Error("delete_many: provide 'path' (single) or 'query' (JSON array of paths)");
+				let deleted = 0;
+				const errors: string[] = [];
+				for (const p of paths) {
+					try {
+						const norm = this.requirePath(p);
+						const file = this.app.vault.getAbstractFileByPath(norm);
+						if (file instanceof TFile) {
+							await this.app.vault.trash(file, true);
+							deleted++;
+						} else {
+							errors.push(norm + ": not found");
+						}
+					} catch (e) {
+						errors.push(p + ": " + errMsg(e));
+					}
+				}
+				return { ...base, ok: true, data: { deleted, errors: errors.length ? errors : undefined } };
+			}
+
+			case "purge_folder": {
+				const folder = job.path ? this.requirePath(job.path).replace(/\.md$/, "") : (job.query || "");
+				if (!folder) throw new Error("purge_folder: provide 'path' (folder path) or 'query' (folder path)");
+				const files = this.app.vault.getMarkdownFiles().filter(f => f.path.startsWith(normalizePath(folder) + "/"));
+				if (!files.length) return { ...base, ok: true, data: { deleted: 0, message: "no files in folder" } };
+				let deleted = 0;
+				for (const f of files) {
+					await this.app.vault.trash(f, true);
+					deleted++;
+				}
+				return { ...base, ok: true, data: { deleted, folder } };
+			}
+
+			case "list_notes": {
 					const files = this.app.vault.getMarkdownFiles();
 					const scope = job.folder ? normalizePath(job.folder) : "";
 					const list = files

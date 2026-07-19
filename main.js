@@ -25504,6 +25504,52 @@ All anime linked here appear in the graph view as one cluster.
           await this.app.vault.create(path, (_c = job.content) != null ? _c : "");
           return { ...base, ok: true, path, data: { path } };
         }
+        case "delete_note": {
+          const path = this.requirePath(job.path);
+          const file = this.app.vault.getAbstractFileByPath(path);
+          if (file instanceof import_obsidian.TFile) {
+            await this.app.vault.trash(file, true);
+            return { ...base, ok: true, data: { deleted: true, path } };
+          } else {
+            throw new Error("note not found: " + path);
+          }
+        }
+        case "delete_many": {
+          const paths = job.path ? [job.path] : job.query ? JSON.parse(job.query) : [];
+          if (!paths.length)
+            throw new Error("delete_many: provide 'path' (single) or 'query' (JSON array of paths)");
+          let deleted = 0;
+          const errors = [];
+          for (const p of paths) {
+            try {
+              const norm = this.requirePath(p);
+              const file = this.app.vault.getAbstractFileByPath(norm);
+              if (file instanceof import_obsidian.TFile) {
+                await this.app.vault.trash(file, true);
+                deleted++;
+              } else {
+                errors.push(norm + ": not found");
+              }
+            } catch (e) {
+              errors.push(p + ": " + errMsg(e));
+            }
+          }
+          return { ...base, ok: true, data: { deleted, errors: errors.length ? errors : void 0 } };
+        }
+        case "purge_folder": {
+          const folder = job.path ? this.requirePath(job.path).replace(/\.md$/, "") : job.query || "";
+          if (!folder)
+            throw new Error("purge_folder: provide 'path' (folder path) or 'query' (folder path)");
+          const files = this.app.vault.getMarkdownFiles().filter((f) => f.path.startsWith((0, import_obsidian.normalizePath)(folder) + "/"));
+          if (!files.length)
+            return { ...base, ok: true, data: { deleted: 0, message: "no files in folder" } };
+          let deleted = 0;
+          for (const f of files) {
+            await this.app.vault.trash(f, true);
+            deleted++;
+          }
+          return { ...base, ok: true, data: { deleted, folder } };
+        }
         case "list_notes": {
           const files = this.app.vault.getMarkdownFiles();
           const scope = job.folder ? (0, import_obsidian.normalizePath)(job.folder) : "";
