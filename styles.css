@@ -121,15 +121,10 @@
 }
 .anime-hero__pull:hover { color: var(--accent); border-color: var(--accent); }
 
-/* ---- locked (read) mode: hide edit chrome ---- */
-.anime-hero.is-locked .anime-hero__pills,
+/* ---- locked mode: only the extra tools hide; tracker always visible ---- */
 .anime-hero.is-locked .anime-hero__search,
-.anime-hero.is-locked .anime-hero__footer,
-.anime-hero.is-locked .anime-hero__step { display: none; }
-.anime-hero.is-locked .anime-hero__range { pointer-events: none; }
-.anime-hero.is-locked .anime-hero__range::-webkit-slider-thumb { opacity: 0; }
-.anime-hero.is-locked .anime-hero__range::-moz-range-thumb { opacity: 0; }
-.anime-hero.is-locked .anime-hero__progress { padding-bottom: 18px; }
+.anime-hero.is-locked .anime-hero__footer { display: none; }
+.anime-hero.is-locked .anime-hero__pills { padding-bottom: 18px; }
 
 /* hide the properties table + inline title on anime pages; the card is the UI */
 .anime-detail .metadata-container { display: none; }

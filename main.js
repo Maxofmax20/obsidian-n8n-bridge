@@ -24437,7 +24437,7 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       gem.createSpan({ cls: "anime-hero__gem-score", text: malScore.toFixed(1) });
       gem.createSpan({ cls: "anime-hero__gem-label", text: "MAL" });
     }
-    const lockBtn = hero.createEl("button", { cls: "anime-hero__lock", attr: { "aria-label": "Edit tracker" } });
+    const lockBtn = hero.createEl("button", { cls: "anime-hero__lock", attr: { "aria-label": "More tools" } });
     (0, import_obsidian.setIcon)(lockBtn, "pencil");
     lockBtn.addEventListener("click", () => {
       const locked = root.hasClass("is-locked");

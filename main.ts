@@ -379,7 +379,9 @@ export default class N8nBridgePlugin extends Plugin {
 
 		// Edit lock: card is read-only until unlocked, so casual scrolling
 		// can't nudge the slider or change status.
-		const lockBtn = hero.createEl("button", { cls: "anime-hero__lock", attr: { "aria-label": "Edit tracker" } });
+		// Pencil toggles the advanced tools (search / pull). The episode
+		// tracker itself stays always-on — hiding it read as "missing".
+		const lockBtn = hero.createEl("button", { cls: "anime-hero__lock", attr: { "aria-label": "More tools" } });
 		setIcon(lockBtn, "pencil");
 		lockBtn.addEventListener("click", () => {
 			const locked = root.hasClass("is-locked");
