@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-n8n-bridge",
-	"version": "1.6.1",
+	"version": "1.7.0",
 	"description": "Two-way bridge between Obsidian and n8n over webhooks (desktop + mobile).",
 	"main": "main.js",
 	"scripts": {

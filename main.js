@@ -24276,7 +24276,12 @@ var DEFAULT_SETTINGS = {
   malOauthState: "",
   mcpEnabled: false,
   mcpPort: 3001,
-  mcpName: "Obsidian Vault"
+  mcpName: "Obsidian Vault",
+  syncUrl: "https://vaultsync.demos25.me",
+  syncSecret: "",
+  syncEnabled: false,
+  syncSeconds: 30,
+  syncState: {}
 };
 var MAL_REDIRECT_URI = "obsidian://n8n-bridge-mal";
 var MAL_STATUS = {
@@ -24300,10 +24305,13 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
     // only toast "unauthorized" once per streak
     this.statusEl = null;
     this.animeSearchCache = /* @__PURE__ */ new Map();
+    this.syncTimer = null;
+    this.syncing = false;
     /* ---------------- MCP Server ---------------- */
     this.mcpServer = null;
     this.mcpHttpServer = null;
   }
+  // re-entrancy guard for sync cycles
   async onload() {
     await this.loadSettings();
     let dirty = false;
@@ -24357,6 +24365,11 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
       name: "Sync vault anime to MyAnimeList",
       callback: () => this.syncVaultToMal()
     });
+    this.addCommand({
+      id: "sync-vault-now",
+      name: "Sync vault now",
+      callback: () => this.syncVaultOnce(true)
+    });
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
         if (file instanceof import_obsidian.TFile && file.extension === "md") {
@@ -24373,10 +24386,13 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
           (e) => console.error("MCP auto-start failed:", e)
         );
       }
+      this.startVaultSync();
     });
     this.registerDomEvent(document, "visibilitychange", () => {
-      if (!document.hidden)
+      if (!document.hidden) {
         this.resumePolling("visible");
+        this.kickVaultSync();
+      }
     });
     this.registerDomEvent(window, "focus", () => this.resumePolling("focus"));
     this.registerDomEvent(window, "online", () => this.resumePolling("online"));
@@ -24392,6 +24408,7 @@ var N8nBridgePlugin = class extends import_obsidian.Plugin {
   }
   onunload() {
     this.stopPolling();
+    this.stopVaultSync();
     this.stopMcpServer().catch(
       (e) => console.error("MCP stop failed on unload:", e)
     );
@@ -25811,6 +25828,207 @@ All anime linked here appear in the graph view as one cluster.
       });
     }
   }
+  /* ---------------- whole-vault sync (our own vault-sync server) ---------------- */
+  // Two-way, newest-wins-by-mtime sync of the ENTIRE vault (markdown +
+  // attachments/binaries) against our own server at settings.syncUrl.
+  // No third-party plugin: every byte of this is ours.
+  syncConfigOk() {
+    return !!(this.settings.syncUrl && this.settings.syncSecret);
+  }
+  trimSyncBase() {
+    return this.settings.syncUrl.replace(/\/+$/, "");
+  }
+  startVaultSync() {
+    this.stopVaultSync();
+    if (!this.settings.syncEnabled)
+      return;
+    if (!this.syncConfigOk())
+      return;
+    const ms = Math.max(10, this.settings.syncSeconds || 30) * 1e3;
+    this.syncTimer = this.registerInterval(
+      window.setInterval(() => this.syncVaultOnce(false), ms)
+    );
+    this.syncVaultOnce(false);
+  }
+  stopVaultSync() {
+    if (this.syncTimer !== null) {
+      window.clearInterval(this.syncTimer);
+      this.syncTimer = null;
+    }
+  }
+  // Cheap idempotent nudge used by resume triggers (app wake on mobile).
+  kickVaultSync() {
+    if (!this.settings.syncEnabled || !this.syncConfigOk())
+      return;
+    this.syncVaultOnce(false);
+  }
+  async syncFetch(path, init = {}) {
+    var _a6, _b;
+    const resp = await (0, import_obsidian.requestUrl)({
+      url: this.trimSyncBase() + path,
+      method: (_a6 = init.method) != null ? _a6 : "GET",
+      headers: {
+        "x-bridge-secret": this.settings.syncSecret,
+        ...init.body ? { "content-type": "application/json" } : {}
+      },
+      body: init.body,
+      throw: false
+    });
+    return {
+      status: resp.status,
+      text: (_b = resp.text) != null ? _b : "",
+      arrayBuffer: resp.arrayBuffer
+    };
+  }
+  // Enumerate every real file in the vault (skips folders and the plugin's
+  // own config). Returns relative path -> mtime (ms).
+  async listLocalFiles() {
+    const out = /* @__PURE__ */ new Map();
+    const files = this.app.vault.getFiles();
+    for (const f of files) {
+      if (f.path.startsWith(this.app.vault.configDir + "/"))
+        continue;
+      out.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
+    }
+    return out;
+  }
+  async syncVaultOnce(manual) {
+    var _a6, _b;
+    if (this.syncing) {
+      if (manual)
+        new import_obsidian.Notice("n8n Bridge: sync already in progress.");
+      return;
+    }
+    if (!this.syncConfigOk()) {
+      if (manual)
+        new import_obsidian.Notice("n8n Bridge: set sync URL and secret first.");
+      return;
+    }
+    this.syncing = true;
+    const notice = manual ? new import_obsidian.Notice("Syncing vault\u2026", 0) : null;
+    let pushed = 0, pulled = 0, deletedLocal = 0, deletedRemote = 0;
+    try {
+      const mres = await this.syncFetch("/sync/manifest");
+      if (mres.status === 401) {
+        if (manual)
+          new import_obsidian.Notice("n8n Bridge: sync unauthorized (bad secret).");
+        return;
+      }
+      if (mres.status < 200 || mres.status >= 300) {
+        if (manual)
+          new import_obsidian.Notice(`n8n Bridge: sync manifest HTTP ${mres.status}.`);
+        return;
+      }
+      const remoteList = (_a6 = JSON.parse(mres.text).files) != null ? _a6 : [];
+      const remote = /* @__PURE__ */ new Map();
+      for (const r of remoteList)
+        remote.set(r.path, { mtime: r.mtime, deleted: !!r.deleted });
+      const local = await this.listLocalFiles();
+      const state = this.settings.syncState || {};
+      const paths = /* @__PURE__ */ new Set([...local.keys(), ...remote.keys()]);
+      for (const path of paths) {
+        const l = local.get(path);
+        const r = remote.get(path);
+        const known = (_b = state[path]) != null ? _b : 0;
+        if (l && r && !r.deleted) {
+          if (l.mtime > r.mtime + 1) {
+            await this.pushFile(path, l.mtime);
+            pushed++;
+          } else if (r.mtime > l.mtime + 1) {
+            await this.pullFile(path, r.mtime);
+            pulled++;
+          }
+          state[path] = Math.max(l.mtime, r.mtime);
+          continue;
+        }
+        if (l && !r) {
+          await this.pushFile(path, l.mtime);
+          pushed++;
+          state[path] = l.mtime;
+          continue;
+        }
+        if (l && r && r.deleted) {
+          if (l.mtime > r.mtime + 1) {
+            await this.pushFile(path, l.mtime);
+            pushed++;
+            state[path] = l.mtime;
+          } else {
+            await this.deleteLocal(path);
+            deletedLocal++;
+            delete state[path];
+          }
+          continue;
+        }
+        if (!l && r) {
+          if (r.deleted) {
+            delete state[path];
+            continue;
+          }
+          if (known && known >= r.mtime) {
+            await this.pushDelete(path);
+            deletedRemote++;
+            delete state[path];
+          } else {
+            await this.pullFile(path, r.mtime);
+            pulled++;
+            state[path] = r.mtime;
+          }
+          continue;
+        }
+      }
+      this.settings.syncState = state;
+      await this.saveSettings();
+      if (notice)
+        notice.setMessage(
+          `Sync done: \u2191${pushed} \u2193${pulled} \u232Blocal ${deletedLocal} \u232Bremote ${deletedRemote}`
+        );
+    } catch (e) {
+      console.error("n8n Bridge: vault sync failed", e);
+      if (manual)
+        new import_obsidian.Notice("n8n Bridge: sync failed \u2014 " + errMsg(e));
+    } finally {
+      this.syncing = false;
+      if (notice)
+        window.setTimeout(() => notice.hide(), 4e3);
+    }
+  }
+  async pushFile(path, mtime) {
+    const buf = await this.app.vault.adapter.readBinary(path);
+    const b64 = arrayBufferToBase64(buf);
+    await this.syncFetch("/sync/file", {
+      method: "POST",
+      body: JSON.stringify({ path, mtime, base64: b64 })
+    });
+  }
+  async pushDelete(path) {
+    await this.syncFetch("/sync/file", {
+      method: "POST",
+      body: JSON.stringify({ path, mtime: Date.now(), deleted: true })
+    });
+  }
+  async pullFile(path, mtime) {
+    const res = await this.syncFetch(
+      "/sync/file?path=" + encodeURIComponent(path),
+      { binary: true }
+    );
+    if (res.status < 200 || res.status >= 300) {
+      console.warn(`n8n Bridge: pull ${path} HTTP ${res.status}`);
+      return;
+    }
+    await this.ensureFolder(path);
+    await this.app.vault.adapter.writeBinary(path, res.arrayBuffer, {
+      mtime
+    });
+  }
+  async deleteLocal(path) {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (f instanceof import_obsidian.TFile) {
+      await this.app.vault.trash(f, false).catch(async () => {
+        await this.app.vault.adapter.remove(path).catch(() => {
+        });
+      });
+    }
+  }
 };
 var N8nBridgeSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
@@ -25971,6 +26189,42 @@ var N8nBridgeSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    containerEl.createEl("h3", { text: "Whole-vault sync" });
+    containerEl.createEl("p", {
+      text: "Two-way sync of the ENTIRE vault (notes + attachments) with our own vault-sync server. Newest change wins by modified time. Use the same URL and secret on every device.",
+      cls: "setting-item-description"
+    });
+    new import_obsidian.Setting(containerEl).setName("Enable vault sync").setDesc("Run a background sync loop on this device.").addToggle(
+      (t) => t.setValue(this.plugin.settings.syncEnabled).onChange(async (v) => {
+        this.plugin.settings.syncEnabled = v;
+        await this.plugin.saveSettings();
+        this.plugin.startVaultSync();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Sync server URL").setDesc("Root of the vault-sync server, no trailing slash.").addText(
+      (t) => t.setPlaceholder("https://vaultsync.demos25.me").setValue(this.plugin.settings.syncUrl).onChange(async (v) => {
+        this.plugin.settings.syncUrl = v.trim();
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Sync secret").setDesc("Shared secret for the vault-sync server (x-bridge-secret).").addText((t) => {
+      t.inputEl.type = "password";
+      t.setPlaceholder("vsync_\u2026").setValue(this.plugin.settings.syncSecret).onChange(async (v) => {
+        this.plugin.settings.syncSecret = v.trim();
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Sync interval (seconds)").setDesc("How often to run a background sync (min 10).").addText(
+      (t) => t.setPlaceholder("30").setValue(String(this.plugin.settings.syncSeconds)).onChange(async (v) => {
+        const n = parseInt(v, 10);
+        this.plugin.settings.syncSeconds = isNaN(n) ? 30 : Math.max(10, Math.min(3600, n));
+        await this.plugin.saveSettings();
+        this.plugin.startVaultSync();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Sync now").addButton(
+      (b) => b.setButtonText("Sync vault now").setCta().onClick(() => this.plugin.syncVaultOnce(true))
+    );
     containerEl.createEl("h3", { text: "Advanced: webhook paths" });
     for (const [key, label, desc] of [
       ["pollPath", "Poll path", "GET endpoint returning pending jobs."],
@@ -26008,4 +26262,16 @@ function errMsg(e) {
   if (e instanceof Error)
     return e.message;
   return String(e);
+}
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 32768;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, i + chunk)
+    );
+  }
+  return btoa(binary);
 }

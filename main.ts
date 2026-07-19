@@ -38,6 +38,12 @@ interface N8nBridgeSettings {
 	mcpEnabled: boolean;
 	mcpPort: number;
 	mcpName: string;
+	// Whole-vault sync (our own server: vault-sync)
+	syncUrl: string; // e.g. https://vaultsync.demos25.me
+	syncSecret: string; // shared secret for the vault-sync server
+	syncEnabled: boolean; // master switch for background vault sync
+	syncSeconds: number; // how often to run a sync cycle
+	syncState: Record<string, number>; // last-synced mtime per relative path
 }
 
 const DEFAULT_SETTINGS: N8nBridgeSettings = {
@@ -60,6 +66,11 @@ const DEFAULT_SETTINGS: N8nBridgeSettings = {
 	mcpEnabled: false,
 	mcpPort: 3001,
 	mcpName: "Obsidian Vault",
+	syncUrl: "https://vaultsync.demos25.me",
+	syncSecret: "",
+	syncEnabled: false,
+	syncSeconds: 30,
+	syncState: {},
 };
 
 const MAL_REDIRECT_URI = "obsidian://n8n-bridge-mal";
@@ -206,6 +217,8 @@ export default class N8nBridgePlugin extends Plugin {
 	private authWarned = false; // only toast "unauthorized" once per streak
 	private statusEl: HTMLElement | null = null;
 	private animeSearchCache: Map<string, MalAnimeSearchResult> = new Map();
+	private syncTimer: number | null = null;
+	private syncing = false; // re-entrancy guard for sync cycles
 
 	async onload() {
 		await this.loadSettings();
@@ -274,6 +287,13 @@ export default class N8nBridgePlugin extends Plugin {
 			callback: () => this.syncVaultToMal(),
 		});
 
+		// Command: run a whole-vault sync cycle right now.
+		this.addCommand({
+			id: "sync-vault-now",
+			name: "Sync vault now",
+			callback: () => this.syncVaultOnce(true),
+		});
+
 		// Right-click a note -> send to n8n.
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu: Menu, file) => {
@@ -297,6 +317,8 @@ export default class N8nBridgePlugin extends Plugin {
 					console.error("MCP auto-start failed:", e)
 				);
 			}
+			// Start the whole-vault sync loop if enabled.
+			this.startVaultSync();
 		});
 
 		// ---- resume triggers: restart polling the instant the app wakes ----
@@ -304,7 +326,10 @@ export default class N8nBridgePlugin extends Plugin {
 		// Each of these events fires on a different wake path; all funnel into
 		// resumePolling(), which is cheap and idempotent.
 		this.registerDomEvent(document, "visibilitychange", () => {
-			if (!document.hidden) this.resumePolling("visible");
+			if (!document.hidden) {
+				this.resumePolling("visible");
+				this.kickVaultSync();
+			}
 		});
 		this.registerDomEvent(window, "focus", () => this.resumePolling("focus"));
 		this.registerDomEvent(window, "online", () => this.resumePolling("online"));
@@ -328,6 +353,7 @@ export default class N8nBridgePlugin extends Plugin {
 
 	onunload() {
 		this.stopPolling();
+		this.stopVaultSync();
 		// Tear down the MCP HTTP server so the port is released on reload.
 		this.stopMcpServer().catch((e) =>
 			console.error("MCP stop failed on unload:", e)
@@ -1808,6 +1834,236 @@ case "create_note": {
 			});
 		}
 	}
+
+	/* ---------------- whole-vault sync (our own vault-sync server) ---------------- */
+	// Two-way, newest-wins-by-mtime sync of the ENTIRE vault (markdown +
+	// attachments/binaries) against our own server at settings.syncUrl.
+	// No third-party plugin: every byte of this is ours.
+
+	syncConfigOk(): boolean {
+		return !!(this.settings.syncUrl && this.settings.syncSecret);
+	}
+
+	private trimSyncBase(): string {
+		return this.settings.syncUrl.replace(/\/+$/, "");
+	}
+
+	startVaultSync() {
+		this.stopVaultSync();
+		if (!this.settings.syncEnabled) return;
+		if (!this.syncConfigOk()) return;
+		const ms = Math.max(10, this.settings.syncSeconds || 30) * 1000;
+		// registerInterval ties the timer to the plugin lifecycle so it can't leak.
+		this.syncTimer = this.registerInterval(
+			window.setInterval(() => this.syncVaultOnce(false), ms)
+		);
+		// Run one cycle right away so the user doesn't wait a full interval.
+		this.syncVaultOnce(false);
+	}
+
+	stopVaultSync() {
+		if (this.syncTimer !== null) {
+			window.clearInterval(this.syncTimer);
+			this.syncTimer = null;
+		}
+	}
+
+	// Cheap idempotent nudge used by resume triggers (app wake on mobile).
+	kickVaultSync() {
+		if (!this.settings.syncEnabled || !this.syncConfigOk()) return;
+		this.syncVaultOnce(false);
+	}
+
+	private async syncFetch(
+		path: string,
+		init: { method?: string; body?: string; binary?: boolean } = {}
+	): Promise<{ status: number; text: string; arrayBuffer: ArrayBuffer }> {
+		const resp = await requestUrl({
+			url: this.trimSyncBase() + path,
+			method: init.method ?? "GET",
+			headers: {
+				"x-bridge-secret": this.settings.syncSecret,
+				...(init.body ? { "content-type": "application/json" } : {}),
+			},
+			body: init.body,
+			throw: false,
+		});
+		return {
+			status: resp.status,
+			text: resp.text ?? "",
+			arrayBuffer: resp.arrayBuffer,
+		};
+	}
+
+	// Enumerate every real file in the vault (skips folders and the plugin's
+	// own config). Returns relative path -> mtime (ms).
+	private async listLocalFiles(): Promise<Map<string, { mtime: number; size: number }>> {
+		const out = new Map<string, { mtime: number; size: number }>();
+		const files = this.app.vault.getFiles(); // all TFiles: md + binary attachments
+		for (const f of files) {
+			// Never sync the plugin's own data/config folder.
+			if (f.path.startsWith(this.app.vault.configDir + "/")) continue;
+			out.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
+		}
+		return out;
+	}
+
+	async syncVaultOnce(manual: boolean): Promise<void> {
+		if (this.syncing) {
+			if (manual) new Notice("n8n Bridge: sync already in progress.");
+			return;
+		}
+		if (!this.syncConfigOk()) {
+			if (manual) new Notice("n8n Bridge: set sync URL and secret first.");
+			return;
+		}
+		this.syncing = true;
+		const notice = manual ? new Notice("Syncing vault…", 0) : null;
+		let pushed = 0,
+			pulled = 0,
+			deletedLocal = 0,
+			deletedRemote = 0;
+		try {
+			// 1. Pull the remote manifest.
+			const mres = await this.syncFetch("/sync/manifest");
+			if (mres.status === 401) {
+				if (manual) new Notice("n8n Bridge: sync unauthorized (bad secret).");
+				return;
+			}
+			if (mres.status < 200 || mres.status >= 300) {
+				if (manual) new Notice(`n8n Bridge: sync manifest HTTP ${mres.status}.`);
+				return;
+			}
+			const remoteList: Array<{ path: string; mtime: number; deleted?: boolean }> =
+				JSON.parse(mres.text).files ?? [];
+			const remote = new Map<string, { mtime: number; deleted: boolean }>();
+			for (const r of remoteList)
+				remote.set(r.path, { mtime: r.mtime, deleted: !!r.deleted });
+
+			const local = await this.listLocalFiles();
+			const state = this.settings.syncState || {};
+			const paths = new Set<string>([...local.keys(), ...remote.keys()]);
+
+			for (const path of paths) {
+				const l = local.get(path);
+				const r = remote.get(path);
+				const known = state[path] ?? 0;
+
+				// --- exists locally, exists (live) remotely: newest wins ---
+				if (l && r && !r.deleted) {
+					if (l.mtime > r.mtime + 1) {
+						await this.pushFile(path, l.mtime);
+						pushed++;
+					} else if (r.mtime > l.mtime + 1) {
+						await this.pullFile(path, r.mtime);
+						pulled++;
+					}
+					state[path] = Math.max(l.mtime, r.mtime);
+					continue;
+				}
+
+				// --- only local ---
+				if (l && !r) {
+					await this.pushFile(path, l.mtime);
+					pushed++;
+					state[path] = l.mtime;
+					continue;
+				}
+
+				// --- local + remote tombstone: did WE change it after the delete? ---
+				if (l && r && r.deleted) {
+					if (l.mtime > r.mtime + 1) {
+						// local edit is newer than the delete -> resurrect remotely
+						await this.pushFile(path, l.mtime);
+						pushed++;
+						state[path] = l.mtime;
+					} else {
+						// remote delete wins -> remove locally
+						await this.deleteLocal(path);
+						deletedLocal++;
+						delete state[path];
+					}
+					continue;
+				}
+
+				// --- only remote ---
+				if (!l && r) {
+					if (r.deleted) {
+						// tombstone for a file we don't have: nothing to do.
+						delete state[path];
+						continue;
+					}
+					if (known && known >= r.mtime) {
+						// We had it, it's gone locally now, remote unchanged since ->
+						// user deleted it here -> propagate the delete to the server.
+						await this.pushDelete(path);
+						deletedRemote++;
+						delete state[path];
+					} else {
+						// New remote file -> pull it down.
+						await this.pullFile(path, r.mtime);
+						pulled++;
+						state[path] = r.mtime;
+					}
+					continue;
+				}
+			}
+
+			this.settings.syncState = state;
+			await this.saveSettings();
+			if (notice)
+				notice.setMessage(
+					`Sync done: ↑${pushed} ↓${pulled} ⌫local ${deletedLocal} ⌫remote ${deletedRemote}`
+				);
+		} catch (e) {
+			console.error("n8n Bridge: vault sync failed", e);
+			if (manual) new Notice("n8n Bridge: sync failed — " + errMsg(e));
+		} finally {
+			this.syncing = false;
+			if (notice) window.setTimeout(() => notice.hide(), 4000);
+		}
+	}
+
+	private async pushFile(path: string, mtime: number) {
+		const buf = await this.app.vault.adapter.readBinary(path);
+		const b64 = arrayBufferToBase64(buf);
+		await this.syncFetch("/sync/file", {
+			method: "POST",
+			body: JSON.stringify({ path, mtime, base64: b64 }),
+		});
+	}
+
+	private async pushDelete(path: string) {
+		await this.syncFetch("/sync/file", {
+			method: "POST",
+			body: JSON.stringify({ path, mtime: Date.now(), deleted: true }),
+		});
+	}
+
+	private async pullFile(path: string, mtime: number) {
+		const res = await this.syncFetch(
+			"/sync/file?path=" + encodeURIComponent(path),
+			{ binary: true }
+		);
+		if (res.status < 200 || res.status >= 300) {
+			console.warn(`n8n Bridge: pull ${path} HTTP ${res.status}`);
+			return;
+		}
+		await this.ensureFolder(path);
+		await this.app.vault.adapter.writeBinary(path, res.arrayBuffer, {
+			mtime,
+		});
+	}
+
+	private async deleteLocal(path: string) {
+		const f = this.app.vault.getAbstractFileByPath(path);
+		if (f instanceof TFile) {
+			// Route through trash if the user has it configured; false = respect setting.
+			await this.app.vault.trash(f, false).catch(async () => {
+				await this.app.vault.adapter.remove(path).catch(() => {});
+			});
+		}
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -2061,6 +2317,79 @@ class N8nBridgeSettingTab extends PluginSettingTab {
 					})
 			);
 
+		containerEl.createEl("h3", { text: "Whole-vault sync" });
+		containerEl.createEl("p", {
+			text:
+				"Two-way sync of the ENTIRE vault (notes + attachments) with our own " +
+				"vault-sync server. Newest change wins by modified time. Use the same " +
+				"URL and secret on every device.",
+			cls: "setting-item-description",
+		});
+
+		new Setting(containerEl)
+			.setName("Enable vault sync")
+			.setDesc("Run a background sync loop on this device.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.syncEnabled).onChange(async (v) => {
+					this.plugin.settings.syncEnabled = v;
+					await this.plugin.saveSettings();
+					this.plugin.startVaultSync();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Sync server URL")
+			.setDesc("Root of the vault-sync server, no trailing slash.")
+			.addText((t) =>
+				t
+					.setPlaceholder("https://vaultsync.demos25.me")
+					.setValue(this.plugin.settings.syncUrl)
+					.onChange(async (v) => {
+						this.plugin.settings.syncUrl = v.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Sync secret")
+			.setDesc("Shared secret for the vault-sync server (x-bridge-secret).")
+			.addText((t) => {
+				t.inputEl.type = "password";
+				t
+					.setPlaceholder("vsync_…")
+					.setValue(this.plugin.settings.syncSecret)
+					.onChange(async (v) => {
+						this.plugin.settings.syncSecret = v.trim();
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName("Sync interval (seconds)")
+			.setDesc("How often to run a background sync (min 10).")
+			.addText((t) =>
+				t
+					.setPlaceholder("30")
+					.setValue(String(this.plugin.settings.syncSeconds))
+					.onChange(async (v) => {
+						const n = parseInt(v, 10);
+						this.plugin.settings.syncSeconds = isNaN(n)
+							? 30
+							: Math.max(10, Math.min(3600, n));
+						await this.plugin.saveSettings();
+						this.plugin.startVaultSync();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Sync now")
+			.addButton((b) =>
+				b
+					.setButtonText("Sync vault now")
+					.setCta()
+					.onClick(() => this.plugin.syncVaultOnce(true))
+			);
+
 		containerEl.createEl("h3", { text: "Advanced: webhook paths" });
 		for (const [key, label, desc] of [
 			["pollPath", "Poll path", "GET endpoint returning pending jobs."],
@@ -2111,4 +2440,19 @@ function randomToken(len: number): string {
 function errMsg(e: unknown): string {
 	if (e instanceof Error) return e.message;
 	return String(e);
+}
+
+/* Base64 <-> ArrayBuffer, chunked so large attachments don't blow the call
+   stack. Works on both desktop (Electron) and mobile (WebView). */
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+	const bytes = new Uint8Array(buf);
+	let binary = "";
+	const chunk = 0x8000; // 32KB per String.fromCharCode call
+	for (let i = 0; i < bytes.length; i += chunk) {
+		binary += String.fromCharCode.apply(
+			null,
+			bytes.subarray(i, i + chunk) as unknown as number[]
+		);
+	}
+	return btoa(binary);
 }
