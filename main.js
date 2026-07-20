@@ -25647,39 +25647,51 @@ All anime linked here appear in the graph view as one cluster.
               await this.app.vault.create(norm, content);
             }
           };
+          const META = {
+            Identity: { icon: "\u{1FAAA}", blurb: "Who the user is \u2014 the core facts." },
+            People: { icon: "\u{1F465}", blurb: "Contacts, family, friends and their numbers." },
+            Education: { icon: "\u{1F393}", blurb: "Studies, courses, and university details." },
+            Preferences: { icon: "\u2699\uFE0F", blurb: "How the user likes to work and communicate." },
+            Projects: { icon: "\u{1F680}", blurb: "Personal goals, plans, and things in motion." },
+            Misc: { icon: "\u{1F9E9}", blurb: "Everything else worth remembering." }
+          };
           const sectionNote = (s) => {
-            const siblings = SECTIONS.filter((x) => x !== s).map((x) => `[[${x}]]`).join(" \xB7 ");
-            const lines = [
-              "---",
-              "cssclasses:",
-              "  - agent-brain",
-              "---",
-              `# ${s}`,
-              "",
-              `Part of [[Brain Index]] \xB7 ${siblings}`,
-              ""
-            ];
+            const m = META[s] || { icon: "\u{1F9E0}", blurb: "" };
+            const siblings = SECTIONS.filter((x) => x !== s).map((x) => `${(META[x] || { icon: "" }).icon} [[${x}]]`).join(" \xB7 ");
+            const lines = ["---", "cssclasses:", "  - agent-brain", "---", `# ${m.icon} ${s}`, ""];
+            if (m.blurb)
+              lines.push(`> [!info] ${m.blurb}`, "");
+            lines.push(`**Up:** [[Brain Index]]  \xB7  **Lobes:** ${siblings}`, "");
+            lines.push(`## Facts \xB7 ${buckets[s].length}`);
             if (!buckets[s].length)
               lines.push("*Empty \u2014 facts will appear here as the agent learns.*");
             for (const k of buckets[s])
               lines.push(`- **${k}**: ${facts[k]}`);
-            lines.push("", `*Last sync: ${stamp}*`);
+            lines.push("", "---", `> [!quote]- How this works`, `> This note is auto-managed by the agent's memory. **Edit any fact line and it updates the agent** on the next sync. Keep the \`- **key**: value\` shape.`, "", `*Last sync: ${stamp}*`);
             return lines.join("\n") + "\n";
           };
           for (const s of SECTIONS)
             await writeNote(`${DIR}/${s}.md`, sectionNote(s));
+          const totalFacts = Object.keys(facts).length;
           const idx = [
             "---",
             "cssclasses:",
             "  - agent-brain",
+            "  - dashboard",
             "---",
-            "# Brain Index",
+            "# \u{1F9E0} Brain Index",
             "",
-            "The agent's memory, organized like a brain. Each section is a lobe; edit any fact line to update the agent.",
-            ""
+            "> [!abstract] The agent's memory",
+            `> ${totalFacts} facts across ${SECTIONS.length} lobes. Each lobe is a note; **edit any fact line to update the agent.**`,
+            "",
+            "**Up:** [[Home]]  \xB7  **Sibling maps:** [[Projects Index]] \xB7 [[Systems Database]]",
+            "",
+            "## \u{1F9E9} Lobes"
           ];
-          for (const s of SECTIONS)
-            idx.push(`- [[${s}]] \u2014 ${buckets[s].length} facts`);
+          for (const s of SECTIONS) {
+            const m = META[s] || { icon: "\u{1F9E0}", blurb: "" };
+            idx.push(`- ${m.icon} [[${s}]] \u2014 **${buckets[s].length}** ${buckets[s].length === 1 ? "fact" : "facts"}${m.blurb ? " \xB7 " + m.blurb : ""}`);
+          }
           idx.push("", `*Last sync: ${stamp}*`);
           await writeNote(`${DIR}/Brain Index.md`, idx.join("\n") + "\n");
           const old = this.app.vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(`${DIR}/Agent Brain.md`));

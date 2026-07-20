@@ -1650,20 +1650,40 @@ case "create_note": {
 						if (existing instanceof TFile) await this.app.vault.modify(existing, content);
 						else { await this.ensureFolder(norm); await this.app.vault.create(norm, content); }
 					};
+					// Per-lobe presentation (emoji + one-line description). Purely
+					// cosmetic — the fact lines below stay `- **key**: value` so the
+					// reverse-sync parser above keeps working untouched.
+					const META: Record<string, { icon: string; blurb: string }> = {
+						Identity: { icon: "🪪", blurb: "Who the user is — the core facts." },
+						People: { icon: "👥", blurb: "Contacts, family, friends and their numbers." },
+						Education: { icon: "🎓", blurb: "Studies, courses, and university details." },
+						Preferences: { icon: "⚙️", blurb: "How the user likes to work and communicate." },
+						Projects: { icon: "🚀", blurb: "Personal goals, plans, and things in motion." },
+						Misc: { icon: "🧩", blurb: "Everything else worth remembering." },
+					};
 					const sectionNote = (s: string): string => {
-						const siblings = SECTIONS.filter((x) => x !== s).map((x) => `[[${x}]]`).join(" · ");
-						const lines = ["---", "cssclasses:", "  - agent-brain", "---", `# ${s}`, "",
-							`Part of [[Brain Index]] · ${siblings}`, ""];
+						const m = META[s] || { icon: "🧠", blurb: "" };
+						const siblings = SECTIONS.filter((x) => x !== s).map((x) => `${(META[x] || { icon: "" }).icon} [[${x}]]`).join(" · ");
+						const lines = ["---", "cssclasses:", "  - agent-brain", "---", `# ${m.icon} ${s}`, ""];
+						if (m.blurb) lines.push(`> [!info] ${m.blurb}`, "");
+						lines.push(`**Up:** [[Brain Index]]  ·  **Lobes:** ${siblings}`, "");
+						lines.push(`## Facts · ${buckets[s].length}`);
 						if (!buckets[s].length) lines.push("*Empty — facts will appear here as the agent learns.*");
 						for (const k of buckets[s]) lines.push(`- **${k}**: ${facts[k]}`);
-						lines.push("", `*Last sync: ${stamp}*`);
+						lines.push("", "---", `> [!quote]- How this works`, `> This note is auto-managed by the agent's memory. **Edit any fact line and it updates the agent** on the next sync. Keep the \`- **key**: value\` shape.`, "", `*Last sync: ${stamp}*`);
 						return lines.join("\n") + "\n";
 					};
 					for (const s of SECTIONS) await writeNote(`${DIR}/${s}.md`, sectionNote(s));
 
-					const idx = ["---", "cssclasses:", "  - agent-brain", "---", "# Brain Index", "",
-						"The agent's memory, organized like a brain. Each section is a lobe; edit any fact line to update the agent.", ""];
-					for (const s of SECTIONS) idx.push(`- [[${s}]] — ${buckets[s].length} facts`);
+					const totalFacts = Object.keys(facts).length;
+					const idx = ["---", "cssclasses:", "  - agent-brain", "  - dashboard", "---", "# 🧠 Brain Index", "",
+						"> [!abstract] The agent's memory", `> ${totalFacts} facts across ${SECTIONS.length} lobes. Each lobe is a note; **edit any fact line to update the agent.**`, "",
+						"**Up:** [[Home]]  ·  **Sibling maps:** [[Projects Index]] · [[Systems Database]]", "",
+						"## 🧩 Lobes"];
+					for (const s of SECTIONS) {
+						const m = META[s] || { icon: "🧠", blurb: "" };
+						idx.push(`- ${m.icon} [[${s}]] — **${buckets[s].length}** ${buckets[s].length === 1 ? "fact" : "facts"}${m.blurb ? " · " + m.blurb : ""}`);
+					}
 					idx.push("", `*Last sync: ${stamp}*`);
 					await writeNote(`${DIR}/Brain Index.md`, idx.join("\n") + "\n");
 

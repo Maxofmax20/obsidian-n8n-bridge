@@ -1,28 +1,28 @@
 {
-	"name": "obsidian-n8n-bridge",
-	"version": "1.7.0",
-	"description": "Two-way bridge between Obsidian and n8n over webhooks (desktop + mobile).",
-	"main": "main.js",
-	"scripts": {
-		"dev": "node esbuild.config.mjs",
-		"build": "node esbuild.config.mjs production"
-	},
-	"keywords": [
-		"obsidian",
-		"n8n",
-		"mcp",
-		"automation"
-	],
-	"author": "Mohammed Samir",
-	"license": "MIT",
-	"devDependencies": {
-		"@types/node": "^20.11.0",
-		"builtin-modules": "^3.3.0",
-		"esbuild": "0.20.0",
-		"obsidian": "latest",
-		"typescript": "5.3.3"
-	},
-	"dependencies": {
-		"@modelcontextprotocol/sdk": "^1.29.0"
-	}
+  "name": "obsidian-n8n-bridge",
+  "version": "1.7.1",
+  "description": "Two-way bridge between Obsidian and n8n over webhooks (desktop + mobile).",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "n8n",
+    "mcp",
+    "automation"
+  ],
+  "author": "Mohammed Samir",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "0.20.0",
+    "obsidian": "latest",
+    "typescript": "5.3.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
 }
